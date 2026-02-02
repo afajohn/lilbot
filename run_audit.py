@@ -40,8 +40,8 @@ def main():
     parser.add_argument(
         '--timeout',
         type=int,
-        default=900,
-        help='Timeout in seconds for each Cypress run (default: 900)'
+        default=600,
+        help='Timeout in seconds for each Cypress run (default: 600)'
     )
     
     args = parser.parse_args()
@@ -93,7 +93,6 @@ def main():
     log.info(f"Found {len(urls)} URLs to analyze.\n")
     
     results = []
-    updates = []
     skipped_count = 0
     
     for idx, (row_index, url, existing_mobile_psi, existing_desktop_psi, should_skip) in enumerate(urls, start=1):
@@ -148,6 +147,8 @@ def main():
                 'desktop_psi_url': desktop_psi_url
             })
             
+            updates = []
+            
             if not existing_mobile_psi and mobile_score is not None:
                 if mobile_score >= SCORE_THRESHOLD:
                     updates.append((row_index, MOBILE_COLUMN, 'passed'))
@@ -159,6 +160,18 @@ def main():
                     updates.append((row_index, DESKTOP_COLUMN, 'passed'))
                 elif desktop_psi_url:
                     updates.append((row_index, DESKTOP_COLUMN, desktop_psi_url))
+            
+            if updates:
+                try:
+                    sheets_client.batch_write_psi_urls(
+                        args.spreadsheet_id,
+                        args.tab,
+                        updates,
+                        service=service
+                    )
+                    log.info(f"  Updated spreadsheet with {len(updates)} value(s)")
+                except Exception as e:
+                    log.error(f"  WARNING: Failed to update spreadsheet: {e}")
             
             log.info(f"Successfully analyzed {url}")
             
@@ -191,21 +204,6 @@ def main():
             })
         
         log.info("")
-    
-    if updates:
-        log.info(f"Updating spreadsheet with {len(updates)} values...")
-        try:
-            sheets_client.batch_write_psi_urls(
-                args.spreadsheet_id,
-                args.tab,
-                updates,
-                service=service
-            )
-            log.info("Spreadsheet updated successfully.\n")
-        except Exception as e:
-            log.error(f"Failed to update spreadsheet: {e}", exc_info=True)
-    else:
-        log.info("No updates to write.\n")
     
     log.info("=" * 80)
     log.info("AUDIT SUMMARY")

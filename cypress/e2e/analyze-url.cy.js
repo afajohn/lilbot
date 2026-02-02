@@ -17,24 +17,28 @@ describe('PageSpeed URL Analysis', () => {
     results.url = testUrl;
   });
 
-  it('should analyze URL on PageSpeed Insights for Mobile and Desktop', () => {
+  it('should analyze URL on PageSpeed Insights for Mobile and Desktop in parallel', () => {
     cy.visit('/');
     
-    cy.get('input[name="url"]', { timeout: 30000 }).should('be.visible').clear().type(testUrl);
+    cy.get('input[name="url"]', { timeout: 10000 }).should('be.visible').clear().type(testUrl);
     
-    cy.get('button').contains(/analyze/i, { timeout: 30000 }).should('be.visible').click();
+    cy.get('button').contains(/analyze/i, { timeout: 10000 }).should('be.visible').click();
     
-    cy.wait(15000);
+    cy.get('.lh-exp-gauge__percentage', { timeout: 120000 }).should('have.length.at.least', 1);
     
-    cy.get('.lh-exp-gauge__percentage', { timeout: 180000 }).should('exist');
+    cy.wait(2000);
     
-    cy.get('button').contains('Mobile', { matchCase: false, timeout: 30000 }).click();
+    cy.get('button').contains('Mobile', { matchCase: false, timeout: 10000 }).should('be.visible').then(($btn) => {
+      if (!$btn.hasClass('active') && !$btn.attr('aria-selected')) {
+        cy.wrap($btn).click();
+        cy.wait(2000);
+      }
+    });
     
-    cy.wait(5000);
-    
-    cy.get('.lh-exp-gauge__percentage', { timeout: 30000 }).first().invoke('text').then((text) => {
+    cy.get('.lh-exp-gauge__percentage', { timeout: 10000 }).first().invoke('text').then((text) => {
       const score = parseInt(text.trim());
       results.mobile.score = score;
+      cy.log(`Mobile score: ${score}`);
       
       if (results.mobile.score < 80) {
         cy.url().then((url) => {
@@ -43,13 +47,14 @@ describe('PageSpeed URL Analysis', () => {
       }
     });
     
-    cy.get('button').contains('Desktop', { matchCase: false, timeout: 30000 }).click();
+    cy.get('button').contains('Desktop', { matchCase: false, timeout: 10000 }).should('be.visible').click();
     
-    cy.wait(5000);
+    cy.wait(2000);
     
-    cy.get('.lh-exp-gauge__percentage', { timeout: 30000 }).first().invoke('text').then((text) => {
+    cy.get('.lh-exp-gauge__percentage', { timeout: 10000 }).first().invoke('text').then((text) => {
       const score = parseInt(text.trim());
       results.desktop.score = score;
+      cy.log(`Desktop score: ${score}`);
       
       if (results.desktop.score < 80) {
         cy.url().then((url) => {

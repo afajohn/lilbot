@@ -44,14 +44,14 @@ def _find_npx() -> str:
     )
 
 
-def run_analysis(url: str, timeout: int = 900, max_retries: int = 10) -> Dict[str, Optional[int | str]]:
+def run_analysis(url: str, timeout: int = 600, max_retries: int = 3) -> Dict[str, Optional[int | str]]:
     """
     Run Cypress analysis for a given URL to get PageSpeed Insights scores.
     
     Args:
         url: The URL to analyze
-        timeout: Maximum time in seconds to wait for Cypress to complete (default: 900)
-        max_retries: Maximum number of retry attempts for transient errors (default: 10)
+        timeout: Maximum time in seconds to wait for Cypress to complete (default: 600)
+        max_retries: Maximum number of retry attempts for transient errors (default: 3)
         
     Returns:
         Dictionary with keys:
@@ -73,7 +73,7 @@ def run_analysis(url: str, timeout: int = 900, max_retries: int = 10) -> Dict[st
         except (CypressRunnerError, FileNotFoundError) as e:
             last_exception = e
             if attempt < max_retries:
-                wait_time = min(5 * (attempt + 1), 30)
+                wait_time = 5
                 time.sleep(wait_time)
                 continue
             raise
@@ -104,7 +104,7 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
     
     try:
         result = subprocess.run(
-            [npx_path, 'cypress', 'run', '--spec', 'cypress/e2e/analyze-url.cy.js'],
+            [npx_path, 'cypress', 'run', '--spec', 'cypress/e2e/analyze-url.cy.js', '--headless', '--browser', 'chrome'],
             cwd=repo_root,
             env=cypress_env,
             capture_output=True,

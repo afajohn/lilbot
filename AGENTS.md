@@ -46,6 +46,19 @@ python run_audit.py --tab "TAB_NAME" --timeout 1200
   - `google-auth` - Authentication
   - Cypress - Browser automation for PageSpeed Insights
 
+## Performance Optimizations
+
+The system has been optimized for faster URL processing:
+
+1. **Reduced Timeouts**: Default timeout reduced from 900s to 600s with optimized Cypress timeouts
+2. **Fewer Retries**: Cypress retries reduced from 5 to 2, Python retries from 10 to 3
+3. **Faster Waits**: Inter-action waits reduced from 5-15s to 2s
+4. **Incremental Updates**: Spreadsheet updates happen immediately after each URL (not batched at end)
+5. **Explicit Headless Mode**: Cypress runs in headless mode with explicit flags
+6. **Optimized Analysis**: PageSpeed Insights runs once, then switches between Mobile/Desktop views
+
+**Key Issue Resolved**: Running `npx cypress open` while `run_audit.py` is executing blocks the headless Cypress instance. Always close the Cypress UI before running audits.
+
 ## Architecture
 
 ### Project Structure
@@ -74,12 +87,14 @@ python run_audit.py --tab "TAB_NAME" --timeout 1200
 1. **Input**: URLs from Google Sheets column A (starting row 2)
 2. **Processing**:
    - `run_audit.py` reads URLs via `sheets_client.py`
-   - For each URL, `cypress_runner.py` launches Cypress (retries up to 10 times on failure)
+   - For each URL, `cypress_runner.py` launches Cypress (retries up to 3 times on failure)
    - Cypress navigates to PageSpeed Insights and extracts scores from `.lh-exp-gauge__percentage`
    - Results saved to JSON files in `cypress/results/`
+   - **Incremental updates**: Spreadsheet is updated immediately after each URL is analyzed (not batched at the end)
 3. **Output**: 
    - For scores >= 80: Cell is filled with the text "passed"
    - For scores < 80: PSI URLs written to columns F (mobile) and G (desktop)
+   - Each URL's results are written to the sheet immediately upon completion
 
 ### Key Components
 
@@ -98,20 +113,22 @@ python run_audit.py --tab "TAB_NAME" --timeout 1200
 #### cypress_runner.py
 - Finds npx executable
 - Runs Cypress tests with proper encoding (UTF-8)
-- Handles timeouts and retries (up to 10 retry attempts with exponential backoff)
+- Handles timeouts and retries (up to 3 retry attempts with fixed 5s wait)
 - Parses JSON results
-- Default timeout: 900 seconds (15 minutes)
+- Default timeout: 600 seconds (10 minutes)
 - **Critical Fix**: Uses `encoding='utf-8', errors='replace'` to prevent Windows UnicodeDecodeError
+- Runs Cypress in explicit headless mode for better performance
 
 #### analyze-url.cy.js
 - Cypress test that automates PageSpeed Insights
 - Visits pagespeed.web.dev
-- Enters URL and runs mobile/desktop analysis
-- Extracts scores from `.lh-exp-gauge__percentage` text
+- Enters URL and triggers analysis (both mobile and desktop results available after single analysis)
+- Switches between Mobile/Desktop views to extract scores from `.lh-exp-gauge__percentage` text
 - Collects report URLs for scores < 80
 - Saves results to JSON
-- Configured with 5 automatic retries on failure
-- Tripled timeout values (defaultCommandTimeout: 30s, pageLoadTimeout: 180s)
+- Configured with 2 automatic retries on failure (reduced from 5)
+- Optimized timeout values (defaultCommandTimeout: 10s, pageLoadTimeout: 120s)
+- Reduced wait times between actions for faster execution
 
 #### logger.py
 - Sets up logging to both console and file
@@ -152,9 +169,9 @@ URLs are read from `A2:A` (not `A:A`) to skip the header row. Row enumeration st
 
 ### Retry Logic
 Cypress runs can fail transiently. The system has multiple layers of retry:
-- Cypress internal retries: 5 attempts per run (configured in cypress.config.js)
-- Python runner retries: Up to 10 attempts with exponential backoff (5s, 10s, 15s, up to 30s)
-- Total possible attempts: Up to 60 (5 × 10 + initial attempt)
+- Cypress internal retries: 2 attempts per run (configured in cypress.config.js)
+- Python runner retries: Up to 3 attempts with fixed 5s wait between attempts
+- Total possible attempts: Up to 12 (2 × 3 + initial attempts)
 
 ### Results File Management
 - Each Cypress run generates a timestamped JSON file
@@ -169,7 +186,7 @@ Cypress runs can fail transiently. The system has multiple layers of retry:
 - `MOBILE_COLUMN`: Column for mobile results (default: 'F')
 - `DESKTOP_COLUMN`: Column for desktop results (default: 'G')
 - `SCORE_THRESHOLD`: Minimum passing score (default: 80)
-- Default timeout: 900 seconds (can be overridden with --timeout flag)
+- Default timeout: 600 seconds (can be overridden with --timeout flag)
 
 ### Environment Variables
 Not currently used, but the code supports them via python-dotenv.
@@ -196,9 +213,9 @@ If PageSpeed Insights UI changes:
 4. Test with `npx cypress open`
 
 ### Adding More Retry Attempts
-1. Modify `max_retries` parameter in `cypress_runner.py` `run_analysis()` function (default: 10)
-2. Modify `retries.runMode` in `cypress.config.js` (default: 5)
-3. Adjust timeout with `--timeout` flag when running `run_audit.py` (default: 900 seconds)
+1. Modify `max_retries` parameter in `cypress_runner.py` `run_analysis()` function (default: 3)
+2. Modify `retries.runMode` in `cypress.config.js` (default: 2)
+3. Adjust timeout with `--timeout` flag when running `run_audit.py` (default: 600 seconds)
 
 ## Testing
 
@@ -227,8 +244,10 @@ Results JSON files in `cypress/results/` show what data was extracted.
 ### Common Issues
 1. **UnicodeDecodeError**: Fixed by adding `encoding='utf-8', errors='replace'` to subprocess calls
 2. **No results file found**: Cypress failed silently - check Cypress logs
-3. **Timeout errors**: Increase timeout with `--timeout 600`
+3. **Timeout errors**: Increase timeout with `--timeout 900` or higher
 4. **Permission denied**: Verify spreadsheet is shared with service account email
+5. **Running `npx cypress open` while `run_audit.py` is running**: These conflict because Cypress can only run one instance at a time. Close the Cypress UI before running the audit script.
+6. **Slow processing**: Ensure you're not running `npx cypress open` simultaneously, which blocks the headless execution
 
 ## Dependencies
 
