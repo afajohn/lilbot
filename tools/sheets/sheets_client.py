@@ -78,9 +78,10 @@ def list_tabs(spreadsheet_id: str, service=None, service_account_file: Optional[
         raise
 
 
-def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_file: Optional[str] = None) -> List[Tuple[int, str]]:
+def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_file: Optional[str] = None) -> List[Tuple[int, str, Optional[str], Optional[str]]]:
     """
     Read URLs from column A of a spreadsheet tab, starting from row 2 (skipping header).
+    Also reads existing PSI URLs from columns F and G.
     
     Args:
         spreadsheet_id: The ID of the Google Spreadsheet
@@ -89,7 +90,7 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
         service_account_file: Optional path to service account JSON file. Used if service is not provided
         
     Returns:
-        List of tuples containing (row_index, url) where row_index is 1-based
+        List of tuples containing (row_index, url, mobile_psi_url, desktop_psi_url) where row_index is 1-based
         
     Raises:
         ValueError: If tab doesn't exist or spreadsheet is not accessible
@@ -101,7 +102,7 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
         service = authenticate(service_account_file)
     
     sheet = service.spreadsheets()
-    range_name = f"{tab_name}!A2:A"
+    range_name = f"{tab_name}!A2:G"
     
     try:
         result = sheet.values().get(
@@ -131,7 +132,9 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
         if row and row[0]:
             url = row[0].strip()
             if url:
-                urls.append((idx, url))
+                mobile_psi_url = row[5].strip() if len(row) > 5 and row[5] else None
+                desktop_psi_url = row[6].strip() if len(row) > 6 and row[6] else None
+                urls.append((idx, url, mobile_psi_url, desktop_psi_url))
     
     return urls
 

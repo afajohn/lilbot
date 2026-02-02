@@ -94,9 +94,25 @@ def main():
     
     results = []
     updates = []
+    skipped_count = 0
     
-    for idx, (row_index, url) in enumerate(urls, start=1):
+    for idx, (row_index, url, existing_mobile_psi, existing_desktop_psi) in enumerate(urls, start=1):
+        if existing_mobile_psi and existing_desktop_psi:
+            log.info(f"[{idx}/{len(urls)}] Skipping {url} (both columns F and G already filled)")
+            skipped_count += 1
+            results.append({
+                'row': row_index,
+                'url': url,
+                'skipped': True
+            })
+            log.info("")
+            continue
+        
         log.info(f"[{idx}/{len(urls)}] Analyzing {url}...")
+        if existing_mobile_psi:
+            log.info(f"  Mobile PSI URL already exists (column F filled), will only update desktop")
+        if existing_desktop_psi:
+            log.info(f"  Desktop PSI URL already exists (column G filled), will only update mobile")
         
         try:
             result = cypress_runner.run_analysis(url, timeout=args.timeout)
@@ -121,10 +137,10 @@ def main():
                 'desktop_psi_url': desktop_psi_url
             })
             
-            if mobile_score is not None and mobile_score < SCORE_THRESHOLD and mobile_psi_url:
+            if not existing_mobile_psi and mobile_score is not None and mobile_score < SCORE_THRESHOLD and mobile_psi_url:
                 updates.append((row_index, MOBILE_COLUMN, mobile_psi_url))
             
-            if desktop_score is not None and desktop_score < SCORE_THRESHOLD and desktop_psi_url:
+            if not existing_desktop_psi and desktop_score is not None and desktop_score < SCORE_THRESHOLD and desktop_psi_url:
                 updates.append((row_index, DESKTOP_COLUMN, desktop_psi_url))
             
             log.info(f"Successfully analyzed {url}")
@@ -179,16 +195,18 @@ def main():
     log.info("=" * 80)
     
     total_urls = len(results)
-    successful = sum(1 for r in results if 'error' not in r)
-    failed = total_urls - successful
+    skipped = sum(1 for r in results if r.get('skipped', False))
+    analyzed = sum(1 for r in results if not r.get('skipped', False) and 'error' not in r)
+    failed = sum(1 for r in results if 'error' in r)
     
     mobile_pass = sum(1 for r in results if r.get('mobile_score') is not None and r['mobile_score'] >= SCORE_THRESHOLD)
     mobile_fail = sum(1 for r in results if r.get('mobile_score') is not None and r['mobile_score'] < SCORE_THRESHOLD)
     desktop_pass = sum(1 for r in results if r.get('desktop_score') is not None and r['desktop_score'] >= SCORE_THRESHOLD)
     desktop_fail = sum(1 for r in results if r.get('desktop_score') is not None and r['desktop_score'] < SCORE_THRESHOLD)
     
-    log.info(f"Total URLs analyzed: {total_urls}")
-    log.info(f"Successful analyses: {successful}")
+    log.info(f"Total URLs found: {total_urls}")
+    log.info(f"URLs skipped (both columns filled): {skipped}")
+    log.info(f"URLs analyzed: {analyzed}")
     log.info(f"Failed analyses: {failed}")
     log.info("")
     log.info(f"Mobile scores >= {SCORE_THRESHOLD}: {mobile_pass}")
