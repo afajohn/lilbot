@@ -57,3 +57,6 @@ __pycache__/
 # Google Service Account credentials
 *service-account*.json
 *service_account*.json
+
+# Audit logs
+logs/

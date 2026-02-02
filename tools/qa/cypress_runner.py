@@ -14,13 +14,14 @@ class CypressTimeoutError(CypressRunnerError):
     pass
 
 
-def run_analysis(url: str, timeout: int = 300) -> Dict[str, Optional[int | str]]:
+def run_analysis(url: str, timeout: int = 300, max_retries: int = 2) -> Dict[str, Optional[int | str]]:
     """
     Run Cypress analysis for a given URL to get PageSpeed Insights scores.
     
     Args:
         url: The URL to analyze
         timeout: Maximum time in seconds to wait for Cypress to complete (default: 300)
+        max_retries: Maximum number of retry attempts for transient errors (default: 2)
         
     Returns:
         Dictionary with keys:
@@ -33,6 +34,28 @@ def run_analysis(url: str, timeout: int = 300) -> Dict[str, Optional[int | str]]
         CypressRunnerError: If Cypress execution fails
         CypressTimeoutError: If Cypress execution exceeds timeout
         FileNotFoundError: If results file cannot be found
+    """
+    last_exception = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            return _run_analysis_once(url, timeout)
+        except (CypressRunnerError, FileNotFoundError) as e:
+            last_exception = e
+            if attempt < max_retries:
+                time.sleep(2)
+                continue
+            raise
+        except CypressTimeoutError:
+            raise
+    
+    if last_exception:
+        raise last_exception
+
+
+def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]:
+    """
+    Internal function to run a single Cypress analysis attempt.
     """
     cypress_env = os.environ.copy()
     cypress_env['CYPRESS_TEST_URL'] = url

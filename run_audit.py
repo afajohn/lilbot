@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
 
 from sheets import sheets_client
 from qa import cypress_runner
+from utils import logger
 
 
 DEFAULT_SPREADSHEET_ID = '1vF4ySHs3nZVD6hkb8CWH7evRAy2V93DhS3wQ9rO3MhU'
@@ -45,35 +46,39 @@ def main():
     
     args = parser.parse_args()
     
+    log = logger.setup_logger()
+    
     if not os.path.exists(args.service_account):
-        print(f"Error: Service account file not found: {args.service_account}")
+        log.error(f"Service account file not found: {args.service_account}")
         sys.exit(1)
     
-    print(f"Authenticating with Google Sheets...")
+    log.info(f"Authenticating with Google Sheets...")
     try:
         service = sheets_client.authenticate(args.service_account)
+        log.info("Authentication successful")
     except Exception as e:
-        print(f"Error: Failed to authenticate: {e}")
+        log.error(f"Failed to authenticate: {e}", exc_info=True)
         sys.exit(1)
     
-    print(f"Reading URLs from spreadsheet tab '{args.tab}'...")
+    log.info(f"Reading URLs from spreadsheet tab '{args.tab}'...")
     try:
         urls = sheets_client.read_urls(args.spreadsheet_id, args.tab, service=service)
+        log.info(f"Successfully read URLs from spreadsheet")
     except Exception as e:
-        print(f"Error: Failed to read URLs: {e}")
+        log.error(f"Failed to read URLs: {e}", exc_info=True)
         sys.exit(1)
     
     if not urls:
-        print("No URLs found in the spreadsheet.")
+        log.info("No URLs found in the spreadsheet.")
         sys.exit(0)
     
-    print(f"Found {len(urls)} URLs to analyze.\n")
+    log.info(f"Found {len(urls)} URLs to analyze.\n")
     
     results = []
     updates = []
     
     for idx, (row_index, url) in enumerate(urls, start=1):
-        print(f"[{idx}/{len(urls)}] Analyzing {url}...")
+        log.info(f"[{idx}/{len(urls)}] Analyzing {url}...")
         
         try:
             result = cypress_runner.run_analysis(url, timeout=args.timeout)
@@ -86,8 +91,8 @@ def main():
             mobile_status = "PASS" if mobile_score is not None and mobile_score >= SCORE_THRESHOLD else "FAIL"
             desktop_status = "PASS" if desktop_score is not None and desktop_score >= SCORE_THRESHOLD else "FAIL"
             
-            print(f"  Mobile: {mobile_score if mobile_score is not None else 'N/A'} ({mobile_status})")
-            print(f"  Desktop: {desktop_score if desktop_score is not None else 'N/A'} ({desktop_status})")
+            log.info(f"  Mobile: {mobile_score if mobile_score is not None else 'N/A'} ({mobile_status})")
+            log.info(f"  Desktop: {desktop_score if desktop_score is not None else 'N/A'} ({desktop_status})")
             
             results.append({
                 'row': row_index,
@@ -104,32 +109,40 @@ def main():
             if desktop_score is not None and desktop_score < SCORE_THRESHOLD and desktop_psi_url:
                 updates.append((row_index, DESKTOP_COLUMN, desktop_psi_url))
             
+            log.info(f"Successfully analyzed {url}")
+            
         except cypress_runner.CypressTimeoutError as e:
-            print(f"  ERROR: Timeout - {e}")
+            error_msg = f"Timeout - {e}"
+            log.error(f"  ERROR: {error_msg}")
+            log.error(f"Failed to analyze {url} due to timeout", exc_info=True)
             results.append({
                 'row': row_index,
                 'url': url,
                 'error': str(e)
             })
         except cypress_runner.CypressRunnerError as e:
-            print(f"  ERROR: Cypress failed - {e}")
+            error_msg = f"Cypress failed - {e}"
+            log.error(f"  ERROR: {error_msg}")
+            log.error(f"Failed to analyze {url} due to Cypress error", exc_info=True)
             results.append({
                 'row': row_index,
                 'url': url,
                 'error': str(e)
             })
         except Exception as e:
-            print(f"  ERROR: Unexpected error - {e}")
+            error_msg = f"Unexpected error - {e}"
+            log.error(f"  ERROR: {error_msg}")
+            log.error(f"Failed to analyze {url} due to unexpected error", exc_info=True)
             results.append({
                 'row': row_index,
                 'url': url,
                 'error': str(e)
             })
         
-        print()
+        log.info("")
     
     if updates:
-        print(f"Updating spreadsheet with {len(updates)} PSI URLs...")
+        log.info(f"Updating spreadsheet with {len(updates)} PSI URLs...")
         try:
             sheets_client.batch_write_psi_urls(
                 args.spreadsheet_id,
@@ -137,15 +150,15 @@ def main():
                 updates,
                 service=service
             )
-            print("Spreadsheet updated successfully.\n")
+            log.info("Spreadsheet updated successfully.\n")
         except Exception as e:
-            print(f"Error: Failed to update spreadsheet: {e}\n")
+            log.error(f"Failed to update spreadsheet: {e}", exc_info=True)
     else:
-        print("No failing scores to report.\n")
+        log.info("No failing scores to report.\n")
     
-    print("=" * 80)
-    print("AUDIT SUMMARY")
-    print("=" * 80)
+    log.info("=" * 80)
+    log.info("AUDIT SUMMARY")
+    log.info("=" * 80)
     
     total_urls = len(results)
     successful = sum(1 for r in results if 'error' not in r)
@@ -156,28 +169,28 @@ def main():
     desktop_pass = sum(1 for r in results if r.get('desktop_score') is not None and r['desktop_score'] >= SCORE_THRESHOLD)
     desktop_fail = sum(1 for r in results if r.get('desktop_score') is not None and r['desktop_score'] < SCORE_THRESHOLD)
     
-    print(f"Total URLs analyzed: {total_urls}")
-    print(f"Successful analyses: {successful}")
-    print(f"Failed analyses: {failed}")
-    print()
-    print(f"Mobile scores >= {SCORE_THRESHOLD}: {mobile_pass}")
-    print(f"Mobile scores < {SCORE_THRESHOLD}: {mobile_fail}")
-    print(f"Desktop scores >= {SCORE_THRESHOLD}: {desktop_pass}")
-    print(f"Desktop scores < {SCORE_THRESHOLD}: {desktop_fail}")
-    print()
+    log.info(f"Total URLs analyzed: {total_urls}")
+    log.info(f"Successful analyses: {successful}")
+    log.info(f"Failed analyses: {failed}")
+    log.info("")
+    log.info(f"Mobile scores >= {SCORE_THRESHOLD}: {mobile_pass}")
+    log.info(f"Mobile scores < {SCORE_THRESHOLD}: {mobile_fail}")
+    log.info(f"Desktop scores >= {SCORE_THRESHOLD}: {desktop_pass}")
+    log.info(f"Desktop scores < {SCORE_THRESHOLD}: {desktop_fail}")
+    log.info("")
     
     if failed > 0:
-        print("Failed URLs:")
+        log.info("Failed URLs:")
         for r in results:
             if 'error' in r:
-                print(f"  Row {r['row']}: {r['url']}")
-                print(f"    Error: {r['error']}")
-        print()
+                log.info(f"  Row {r['row']}: {r['url']}")
+                log.info(f"    Error: {r['error']}")
+        log.info("")
     
     if mobile_fail > 0 or desktop_fail > 0:
-        print(f"PSI URLs for failing scores written to columns {MOBILE_COLUMN} (mobile) and {DESKTOP_COLUMN} (desktop).")
+        log.info(f"PSI URLs for failing scores written to columns {MOBILE_COLUMN} (mobile) and {DESKTOP_COLUMN} (desktop).")
     
-    print("=" * 80)
+    log.info("=" * 80)
 
 
 if __name__ == '__main__':
