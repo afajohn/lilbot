@@ -1,28 +1,242 @@
-1→# Agent Development Guide
-2→
-3→## Commands
-4→
-5→**Setup:** (To be determined - repo not yet initialized)
-6→
-7→**Build:** (To be determined)
-8→
-9→**Lint:** (To be determined)
-10→
-11→**Test:** (To be determined)
-12→
-13→**Dev Server:** (To be determined)
-14→
-15→## Tech Stack
-16→
-17→- Language: (To be determined)
-18→- Framework: (To be determined)
-19→
-20→## Architecture
-21→
-22→(To be determined based on project structure)
-23→
-24→## Code Style
-25→
-26→- Follow existing conventions in the codebase
-27→- No comments unless necessary for complex logic
-28→
+# Agent Development Guide
+
+## Commands
+
+**Setup:**
+```bash
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Install Node.js dependencies
+npm install
+```
+
+**Validate Setup:**
+```bash
+python validate_setup.py
+```
+
+**List Spreadsheet Tabs:**
+```bash
+python list_tabs.py --spreadsheet-id "YOUR_ID" --service-account "service-account.json"
+```
+
+**Run Audit:**
+```bash
+python run_audit.py --tab "TAB_NAME" --service-account "service-account.json"
+```
+
+**Build:** Not applicable (Python script)
+
+**Lint:** Not configured
+
+**Test:** Not configured
+
+**Dev Server:** Not applicable (CLI tool)
+
+## Tech Stack
+
+- **Language**: Python 3.7+
+- **Browser Automation**: Cypress (JavaScript/Node.js)
+- **APIs**: Google Sheets API v4
+- **Key Libraries**:
+  - `google-api-python-client` - Google Sheets integration
+  - `google-auth` - Authentication
+  - Cypress - Browser automation for PageSpeed Insights
+
+## Architecture
+
+### Project Structure
+
+```
+.
+├── run_audit.py              # Main entry point - orchestrates the audit
+├── list_tabs.py              # Utility to list spreadsheet tabs
+├── get_service_account_email.py  # Utility to get service account email
+├── validate_setup.py         # Setup validation script
+├── tools/
+│   ├── sheets/
+│   │   └── sheets_client.py  # Google Sheets API wrapper
+│   ├── qa/
+│   │   └── cypress_runner.py # Cypress automation wrapper
+│   └── utils/
+│       └── logger.py         # Logging utilities
+└── cypress/
+    ├── e2e/
+    │   └── analyze-url.cy.js # PageSpeed Insights test automation
+    └── results/              # Generated JSON results (gitignored)
+```
+
+### Data Flow
+
+1. **Input**: URLs from Google Sheets column A (starting row 2)
+2. **Processing**:
+   - `run_audit.py` reads URLs via `sheets_client.py`
+   - For each URL, `cypress_runner.py` launches Cypress
+   - Cypress navigates to PageSpeed Insights and extracts scores
+   - Results saved to JSON files in `cypress/results/`
+3. **Output**: PSI URLs written to columns F (mobile) and G (desktop) for scores < 80
+
+### Key Components
+
+#### run_audit.py
+- Main orchestrator
+- Handles command-line arguments
+- Manages the audit loop
+- Collects and reports statistics
+
+#### sheets_client.py
+- Authenticates with Google Sheets API
+- Reads URLs from spreadsheet (range A2:A)
+- Writes PSI URLs back to spreadsheet
+- Handles errors (permissions, missing tabs, etc.)
+
+#### cypress_runner.py
+- Finds npx executable
+- Runs Cypress tests with proper encoding (UTF-8)
+- Handles timeouts and retries
+- Parses JSON results
+- **Critical Fix**: Uses `encoding='utf-8', errors='replace'` to prevent Windows UnicodeDecodeError
+
+#### analyze-url.cy.js
+- Cypress test that automates PageSpeed Insights
+- Visits pagespeed.web.dev
+- Enters URL and runs mobile/desktop analysis
+- Extracts scores and report URLs
+- Saves results to JSON
+
+#### logger.py
+- Sets up logging to both console and file
+- Creates timestamped log files in `logs/` directory
+
+## Code Style
+
+- Follow PEP 8 for Python code
+- No comments unless necessary for complex logic
+- Use type hints for function parameters and returns
+- Handle errors gracefully with informative messages
+- Use f-strings for string formatting
+- Keep functions focused and single-purpose
+
+## Important Implementation Details
+
+### Unicode Encoding Fix
+All subprocess calls must include:
+```python
+subprocess.run(
+    [...],
+    capture_output=True,
+    text=True,
+    encoding='utf-8',
+    errors='replace'
+)
+```
+This prevents `UnicodeDecodeError` on Windows when Cypress outputs non-ASCII characters.
+
+### Spreadsheet Range
+URLs are read from `A2:A` (not `A:A`) to skip the header row. Row enumeration starts at 2 to maintain correct row numbers when writing results back.
+
+### Error Handling
+- Catch specific exceptions (FileNotFoundError, PermissionError, ValueError)
+- Provide actionable error messages
+- Log full tracebacks for debugging
+- Continue processing remaining URLs even if one fails
+
+### Retry Logic
+Cypress runs can fail transiently. The runner retries up to 2 times before giving up.
+
+### Results File Management
+- Each Cypress run generates a timestamped JSON file
+- The runner tracks existing files before running and identifies new files after
+- This prevents race conditions when running multiple audits
+
+## Configuration
+
+### Constants in run_audit.py
+- `DEFAULT_SPREADSHEET_ID`: Default Google Sheets ID
+- `SERVICE_ACCOUNT_FILE`: Default service account path
+- `MOBILE_COLUMN`: Column for mobile PSI URLs (default: 'F')
+- `DESKTOP_COLUMN`: Column for desktop PSI URLs (default: 'G')
+- `SCORE_THRESHOLD`: Minimum passing score (default: 80)
+
+### Environment Variables
+Not currently used, but the code supports them via python-dotenv.
+
+## Common Tasks
+
+### Adding a New Column
+1. Define a new column constant in `run_audit.py`
+2. Modify the results processing logic
+3. Add the value to the `updates` list
+4. Update README documentation
+
+### Changing Score Threshold
+Edit `SCORE_THRESHOLD` in `run_audit.py`.
+
+### Modifying Cypress Selectors
+If PageSpeed Insights UI changes:
+1. Edit `cypress/e2e/analyze-url.cy.js`
+2. Update selectors to match new DOM structure
+3. Test with `npx cypress open`
+
+### Adding More Retry Attempts
+Modify `max_retries` parameter in `cypress_runner.py` `run_analysis()` function.
+
+## Testing
+
+No formal test suite exists. Manual testing workflow:
+
+1. Run `python validate_setup.py` to verify setup
+2. Run `python list_tabs.py` to verify Google Sheets access
+3. Run `python run_audit.py --tab "Test Tab"` with a small set of URLs
+4. Verify results in spreadsheet
+5. Check logs in `logs/` directory
+
+## Debugging
+
+### Enable Verbose Logging
+Logs are automatically saved to `logs/audit_YYYYMMDD_HHMMSS.log`.
+
+### Test Cypress Manually
+```bash
+npx cypress open
+```
+Run the `analyze-url.cy.js` test in the Cypress UI to see what's happening.
+
+### Check Results Files
+Results JSON files in `cypress/results/` show what data was extracted.
+
+### Common Issues
+1. **UnicodeDecodeError**: Fixed by adding `encoding='utf-8', errors='replace'` to subprocess calls
+2. **No results file found**: Cypress failed silently - check Cypress logs
+3. **Timeout errors**: Increase timeout with `--timeout 600`
+4. **Permission denied**: Verify spreadsheet is shared with service account email
+
+## Dependencies
+
+### Python (requirements.txt)
+- `google-auth`: Authentication
+- `google-auth-oauthlib`: OAuth2 flows
+- `google-auth-httplib2`: HTTP transport
+- `google-api-python-client`: Google Sheets API
+- `python-dotenv`: Environment variables (optional)
+- `argparse`: Command-line parsing (built-in)
+
+### Node.js (package.json)
+- `cypress`: Browser automation
+
+## Security
+
+- Service account credentials (`service-account.json`) must never be committed
+- `.gitignore` excludes all `*service-account*.json` files
+- Service accounts should have minimal permissions (only Sheets access needed)
+- Spreadsheets should only be shared with necessary service accounts
+
+## Limitations
+
+- Rate limits: Google Sheets API has quotas (100 requests per 100 seconds per user)
+- PageSpeed Insights may rate-limit high-volume usage
+- Cypress requires a browser and graphics environment (use Xvfb on headless Linux)
+- Windows encoding issues are mitigated but may still occur with exotic characters
+- URLs must be in column A starting at row 2
+- Results always written to columns F and G (not configurable via CLI)

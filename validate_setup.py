@@ -40,7 +40,7 @@ def check_python_dependencies():
 def check_nodejs():
     print("\n=== Checking Node.js and npm ===")
     try:
-        result = subprocess.run(['node', '--version'], capture_output=True, text=True)
+        result = subprocess.run(['node', '--version'], capture_output=True, text=True, encoding='utf-8', errors='replace')
         if result.returncode == 0:
             print_status(f"Node.js {result.stdout.strip()} installed", "pass")
             node_ok = True
@@ -52,7 +52,7 @@ def check_nodejs():
         node_ok = False
     
     try:
-        result = subprocess.run(['npm', '--version'], capture_output=True, text=True)
+        result = subprocess.run(['npm', '--version'], capture_output=True, text=True, encoding='utf-8', errors='replace')
         if result.returncode == 0:
             print_status(f"npm {result.stdout.strip()} installed", "pass")
             npm_ok = True
@@ -80,7 +80,7 @@ def check_cypress():
         return False
     
     try:
-        result = subprocess.run(['npx', 'cypress', 'version'], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(['npx', 'cypress', 'version'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
         if result.returncode == 0:
             print_status("Cypress executable working", "pass")
             return True

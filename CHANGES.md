@@ -1,171 +1,183 @@
 # Changes Summary
 
-## What Was Fixed
+## Issues Fixed
 
-Your original error:
-```
-HttpError 404: "Requested entity was not found" 
-when requesting tab "Barranquilla Singles"
-```
+### 1. Unicode Decode Error (Primary Issue)
+**Problem:** 
+- Windows encoding error: `UnicodeDecodeError: 'charmap' codec can't decode byte 0x90`
+- Occurred when running subprocess commands (Cypress)
+- Windows default encoding (cp1252) couldn't handle non-ASCII characters in Cypress output
 
-This occurred because:
-1. Tab name doesn't exist or is different
-2. No diagnostic tools to identify the problem
-3. Confusing error messages
+**Solution:**
+- Added explicit UTF-8 encoding to all `subprocess.run()` calls
+- Added `errors='replace'` to handle any remaining encoding issues gracefully
+- Files modified:
+  - `tools/qa/cypress_runner.py` - Line 105-115
+  - `validate_setup.py` - Lines 43, 55, 83
 
-## New Features Added
+**Code Changes:**
+```python
+# Before
+subprocess.run([...], capture_output=True, text=True)
 
-### 1. Diagnostic Utilities (3 new scripts)
-
-**`validate_setup.py`** - Complete setup validation
-- Checks Python dependencies
-- Verifies Node.js and Cypress
-- Validates service account file
-- Tests Google Sheets access
-- Shows available tabs
-
-**`list_tabs.py`** - List all spreadsheet tabs
-- Shows exact tab names
-- Verifies authentication
-- Identifies access issues
-
-**`get_service_account_email.py`** - Get email for sharing
-- Extracts email from JSON
-- Shows sharing instructions
-- Validates file structure
-
-### 2. Enhanced Error Handling
-
-**`tools/sheets/sheets_client.py`** improvements:
-- New `list_tabs()` function
-- Better error messages with solutions
-- Automatic tab listing on 404 errors
-- Permission error detection
-- Service account validation
-
-**`run_audit.py`** improvements:
-- Specific exception handling
-- Helpful error messages with steps
-- Better prerequisite validation
-
-### 3. Comprehensive Documentation (7 new guides)
-
-1. **QUICK_START.md** - 5-minute setup guide
-2. **SETUP_GUIDE.md** - Complete step-by-step setup
-3. **ERROR_REFERENCE.md** - Quick error solutions
-4. **TROUBLESHOOTING.md** - Detailed troubleshooting
-5. **USER_ACTION_ITEMS.md** - What you need to do now
-6. **IMPLEMENTATION_SUMMARY.md** - Technical details
-7. **CHANGES.md** - This file
-
-### 4. Better Error Messages
-
-**Before:**
-```
-Failed to read URLs: <HttpError 404...>
+# After
+subprocess.run([...], capture_output=True, text=True, encoding='utf-8', errors='replace')
 ```
 
-**After:**
-```
-ERROR: Tab 'Barranquilla Singles' not found in spreadsheet.
-Available tabs: Website 1, Website 2, Production Sites
+### 2. Wrong Starting Row for URLs
+**Problem:**
+- URLs were read from A1:A (including header row)
+- First URL in row 1 was being treated as data
 
-Run 'python list_tabs.py' to see all available tab names.
-```
+**Solution:**
+- Changed range from `A:A` to `A2:A` to skip header row
+- Updated enumeration to start from row 2 instead of row 1
+- Files modified:
+  - `tools/sheets/sheets_client.py` - Lines 104, 130
 
-## How To Use The New Tools
+**Code Changes:**
+```python
+# Before
+range_name = f"{tab_name}!A:A"
+for idx, row in enumerate(values, start=1):
 
-### First Time Setup
-```bash
-# 1. Validate your setup
-python validate_setup.py
-
-# 2. Get service account email for sharing
-python get_service_account_email.py
-
-# 3. List available tabs
-python list_tabs.py
-
-# 4. Run audit with correct tab name
-python run_audit.py --tab "EXACT_TAB_NAME"
+# After
+range_name = f"{tab_name}!A2:A"
+for idx, row in enumerate(values, start=2):
 ```
 
-### Troubleshooting Workflow
-```bash
-# Something not working?
-python validate_setup.py  # Comprehensive diagnostics
+## Documentation Updates
 
-# Don't know tab names?
-python list_tabs.py  # Shows all tabs
+### New Files Created
 
-# Need service account email?
-python get_service_account_email.py  # Shows email
+1. **INSTALL.md** - Comprehensive installation guide
+   - Step-by-step setup instructions
+   - Platform-specific notes (Windows, Mac, Linux)
+   - Troubleshooting for common installation issues
+
+2. **QUICKSTART.md** - Quick reference guide
+   - 5-minute setup overview
+   - Common commands reference
+   - Quick troubleshooting tips
+
+3. **CHANGES.md** - This file
+   - Summary of all changes made
+   - Technical details for developers
+
+### Updated Files
+
+1. **README.md** - Enhanced with:
+   - Links to all documentation files
+   - Key features list
+   - Clarification that row 1 is treated as header
+   - Updated spreadsheet format examples
+   - Windows encoding error fix documentation
+   - Better organized sections
+
+2. **AGENTS.md** - Updated with:
+   - Actual tech stack details
+   - Project architecture documentation
+   - Code style guidelines
+   - Important implementation details (encoding fix)
+   - Common tasks and debugging info
+
+## Technical Details
+
+### Encoding Issue Deep Dive
+
+**Root Cause:**
+- Python's `subprocess` module on Windows defaults to `cp1252` encoding
+- Cypress outputs contain UTF-8 characters (DevTools messages, URLs, etc.)
+- Byte 0x90 is valid in UTF-8 but undefined in cp1252
+
+**Why It Happened:**
+- Cypress outputs browser messages containing special characters
+- DevTools listening messages contain non-ASCII characters
+- Without explicit encoding, Python uses system default (cp1252 on Windows)
+
+**Complete Fix:**
+```python
+result = subprocess.run(
+    [npx_path, 'cypress', 'run', '--spec', 'cypress/e2e/analyze-url.cy.js'],
+    cwd=repo_root,
+    env=cypress_env,
+    capture_output=True,
+    text=True,
+    encoding='utf-8',      # Force UTF-8 encoding
+    errors='replace',       # Replace undecodable bytes with �
+    timeout=timeout,
+    shell=False
+)
 ```
+
+### Row Enumeration Fix
+
+**Why Row 2:**
+- Google Sheets uses 1-based indexing
+- Row 1 is the header ("URL", etc.)
+- Data starts at row 2
+- When writing PSI URLs back, we need correct row numbers
+
+**Implementation:**
+```python
+# Reading
+range_name = f"{tab_name}!A2:A"  # Start from A2
+for idx, row in enumerate(values, start=2):  # Enumerate from 2
+    urls.append((idx, url))  # idx will be 2, 3, 4, ...
+
+# Writing
+range_name = f"{tab_name}!{column}{row_index}"  # row_index is 2, 3, 4, ...
+```
+
+## Testing Recommendations
+
+To verify the fixes:
+
+1. **Unicode Fix:**
+   ```bash
+   python run_audit.py --tab "Barranquilla Singles" --service-account "service-account.json"
+   ```
+   Should no longer produce UnicodeDecodeError
+
+2. **Row Number Fix:**
+   - Check that PSI URLs are written to the correct rows
+   - Row 2's PSI URL should appear in F2/G2, not F1/G1
+   - Verify header row (row 1) is not overwritten
+
+3. **Overall Verification:**
+   ```bash
+   python validate_setup.py
+   ```
+   Should pass all checks
 
 ## Files Modified
 
-### Core Files Enhanced:
-- `tools/sheets/sheets_client.py` - Better error handling
-- `run_audit.py` - Improved error messages
-- `README.md` - Documentation links
+### Code Files
+- `tools/qa/cypress_runner.py` - UTF-8 encoding fix
+- `tools/sheets/sheets_client.py` - A2:A range and row enumeration fix
+- `validate_setup.py` - UTF-8 encoding fix
 
-### New Utility Scripts:
-- `validate_setup.py` - Setup validation
-- `list_tabs.py` - Tab listing
-- `get_service_account_email.py` - Email extraction
+### Documentation Files
+- `README.md` - Enhanced and reorganized
+- `AGENTS.md` - Complete rewrite with actual project details
+- `INSTALL.md` - New comprehensive installation guide
+- `QUICKSTART.md` - New quick reference guide
+- `CHANGES.md` - New change log (this file)
 
-### New Documentation:
-- `QUICK_START.md` - Quick reference
-- `SETUP_GUIDE.md` - Complete guide
-- `ERROR_REFERENCE.md` - Error solutions
-- `TROUBLESHOOTING.md` - Detailed help
-- `USER_ACTION_ITEMS.md` - Next steps
-- `IMPLEMENTATION_SUMMARY.md` - Technical details
+## Backward Compatibility
 
-## What You Need To Do Now
+These changes are **backward compatible**:
+- Existing spreadsheets work with row 1 as header
+- Encoding fix doesn't break non-Windows systems
+- No API changes to any functions
+- No configuration changes required
 
-Follow the steps in **[USER_ACTION_ITEMS.md](USER_ACTION_ITEMS.md)**
+## Future Improvements
 
-Quick summary:
-1. Get `service-account.json` from Google Cloud Console
-2. Enable Google Sheets API
-3. Share spreadsheet with service account email
-4. Run `python list_tabs.py` to see actual tab names
-5. Run audit with correct tab name
-
-## Benefits
-
-✅ **Clear error messages** - Know exactly what's wrong  
-✅ **Diagnostic tools** - Validate setup before running  
-✅ **Better documentation** - Multiple guides for different needs  
-✅ **Easier setup** - Step-by-step instructions  
-✅ **Quick fixes** - Identify and resolve issues fast  
-
-## No Breaking Changes
-
-All existing functionality works exactly as before. These changes only add:
-- Better error handling
-- Diagnostic utilities
-- Comprehensive documentation
-
-Your existing commands still work the same way.
-
-## Next Steps
-
-1. **Read [USER_ACTION_ITEMS.md](USER_ACTION_ITEMS.md)** - Fix your immediate issue
-2. **Run `python validate_setup.py`** - Validate your setup
-3. **Use `python list_tabs.py`** - Find correct tab names
-4. **Check [QUICK_START.md](QUICK_START.md)** - Quick reference
-
-## Documentation Index
-
-Start here based on your needs:
-
-- **Just want it to work?** → [USER_ACTION_ITEMS.md](USER_ACTION_ITEMS.md)
-- **First time setup?** → [QUICK_START.md](QUICK_START.md)
-- **Need detailed setup?** → [SETUP_GUIDE.md](SETUP_GUIDE.md)
-- **Have an error?** → [ERROR_REFERENCE.md](ERROR_REFERENCE.md)
-- **Still stuck?** → [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
-- **Want technical details?** → [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)
-
-All issues identified in your error have been resolved with proper handling, validation, and documentation!
+Potential enhancements not implemented in this fix:
+1. Make starting row configurable (--start-row flag)
+2. Make output columns configurable via CLI
+3. Add formal test suite
+4. Add progress bar for long audits
+5. Support multiple spreadsheets in one run
+6. Cache results to avoid re-analyzing unchanged URLs

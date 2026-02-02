@@ -80,7 +80,7 @@ def list_tabs(spreadsheet_id: str, service=None, service_account_file: Optional[
 
 def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_file: Optional[str] = None) -> List[Tuple[int, str]]:
     """
-    Read URLs from column A of a spreadsheet tab.
+    Read URLs from column A of a spreadsheet tab, starting from row 2 (skipping header).
     
     Args:
         spreadsheet_id: The ID of the Google Spreadsheet
@@ -101,7 +101,7 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
         service = authenticate(service_account_file)
     
     sheet = service.spreadsheets()
-    range_name = f"{tab_name}!A:A"
+    range_name = f"{tab_name}!A2:A"
     
     try:
         result = sheet.values().get(
@@ -127,7 +127,7 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
     values = result.get('values', [])
     
     urls = []
-    for idx, row in enumerate(values, start=1):
+    for idx, row in enumerate(values, start=2):
         if row and row[0]:
             url = row[0].strip()
             if url:

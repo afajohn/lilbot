@@ -108,6 +108,8 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
             env=cypress_env,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=timeout,
             shell=False
         )

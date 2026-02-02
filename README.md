@@ -2,19 +2,36 @@
 
 Automated tool for running PageSpeed Insights audits on URLs from Google Sheets and writing results back to the spreadsheet.
 
+## 📚 Documentation
+
+- **[QUICKSTART.md](QUICKSTART.md)** - Get started in 5 minutes
+- **[INSTALL.md](INSTALL.md)** - Detailed installation guide
+- **[README.md](README.md)** - Full documentation (this file)
+- **[AGENTS.md](AGENTS.md)** - Developer guide
+
 ## Overview
 
 This tool reads URLs from a Google Spreadsheet, analyzes each URL using PageSpeed Insights (via Cypress automation), and writes PageSpeed report URLs back to the spreadsheet for URLs with scores below 80.
 
+**Key Features:**
+- ✅ Batch process URLs from Google Sheets
+- ✅ Automated PageSpeed Insights analysis via Cypress
+- ✅ Real-time progress tracking
+- ✅ Automatic retry on transient failures
+- ✅ Comprehensive logging
+- ✅ Windows Unicode encoding fix
+
 ## Prerequisites
 
-- Python 3.7+
-- Node.js 14+ and npm
-- Google Cloud service account with Sheets API access
+- **Python 3.7+** - Download from [python.org](https://www.python.org/downloads/)
+- **Node.js 14+ and npm** - Download from [nodejs.org](https://nodejs.org/)
+- **Google Cloud service account** with Sheets API access
 
 ## Setup Instructions
 
 ### 1. Install Python Dependencies
+
+Open a terminal/command prompt in the project directory and run:
 
 ```bash
 pip install -r requirements.txt
@@ -25,16 +42,16 @@ This installs:
 - `google-auth-oauthlib` - OAuth2 support
 - `google-auth-httplib2` - HTTP transport for Google APIs
 - `google-api-python-client` - Google Sheets API client
-- `python-dotenv` - Environment variable management
-- `argparse` - Command-line argument parsing
 
 ### 2. Install Node.js Dependencies
+
+In the same terminal, run:
 
 ```bash
 npm install
 ```
 
-This installs Cypress for browser automation.
+This installs Cypress for browser automation and related dependencies.
 
 ### 3. Google Cloud Service Account Setup
 
@@ -54,7 +71,7 @@ This installs Cypress for browser automation.
 3. Click **Add Key** > **Create new key**
 4. Select **JSON** format
 5. Click **Create** - the key file will download automatically
-6. Save the file as `service-account.json` in the project root directory
+6. **Save the file as `service-account.json`** in the project root directory
 
 #### Enable Google Sheets API
 
@@ -72,37 +89,17 @@ This installs Cypress for browser automation.
 6. Give it **Editor** permissions
 7. Uncheck "Notify people" and click **Share**
 
-### 4. Environment Variables (Optional)
-
-Copy `.env.example` to `.env` and customize if needed:
-
+**Tip**: You can also get the service account email by running:
 ```bash
-cp .env.example .env
+python get_service_account_email.py
 ```
-
-Edit `.env`:
-```
-GOOGLE_SHEETS_ID=your-spreadsheet-id-here
-GOOGLE_SERVICE_ACCOUNT_PATH=path/to/service-account.json
-```
-
-**Note:** Environment variables are optional. You can provide spreadsheet ID and service account path via command-line arguments.
 
 ## Usage
 
 ### Basic Usage
 
 ```bash
-python run_audit.py --tab "Barranquilla Singles"
-```
-
-### Advanced Options
-
-```bash
-python run_audit.py --tab "Barranquilla Singles" \
-  --spreadsheet-id "1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I" \
-  --service-account "service-account.json" \
-  --timeout 300
+python run_audit.py --tab "Barranquilla Singles" --service-account "service-account.json"
 ```
 
 ### Command-Line Arguments
@@ -116,58 +113,67 @@ python run_audit.py --tab "Barranquilla Singles" \
 
 ### Examples
 
-Analyze URLs from "Q1 2024" tab:
+**Analyze URLs from a specific tab:**
 ```bash
-python run_audit.py --tab "Q1 2024"
+python run_audit.py --tab "Barranquilla Singles"
 ```
 
-Use a different spreadsheet:
+**Use a different spreadsheet:**
 ```bash
 python run_audit.py --tab "Production Sites" --spreadsheet-id "abc123xyz"
 ```
 
-Use a custom service account file location:
+**Use a custom service account file location:**
 ```bash
-python run_audit.py --tab "Website 1" --service-account "/path/to/credentials.json"
+python run_audit.py --tab "Website 1" --service-account "C:\path\to\credentials.json"
 ```
 
-Increase timeout for slow-loading sites:
+**Increase timeout for slow-loading sites:**
 ```bash
 python run_audit.py --tab "Website 1" --timeout 600
 ```
 
-## Google Sheets Column Mapping
+### List Available Tabs
 
-The tool expects and writes to the following columns:
+To see all available tabs in your spreadsheet:
+```bash
+python list_tabs.py --spreadsheet-id "YOUR_SPREADSHEET_ID" --service-account "service-account.json"
+```
 
-| Column | Purpose | Access |
-|--------|---------|--------|
-| **A** | URLs to analyze | **Read** |
-| **F** | Mobile PageSpeed Insights URLs | **Write** (only for scores < 80) |
-| **G** | Desktop PageSpeed Insights URLs | **Write** (only for scores < 80) |
+## Google Sheets Format
 
-### Spreadsheet Format
+### Required Column Structure
 
-Your spreadsheet tab should be structured as:
+The tool expects your spreadsheet to have the following structure:
+
+| Column | Purpose | Access | Notes |
+|--------|---------|--------|-------|
+| **A** | URLs to analyze | **Read** | Starting from row 2 (A2:A) |
+| **F** | Mobile PageSpeed Insights URLs | **Write** | Only for scores < 80 |
+| **G** | Desktop PageSpeed Insights URLs | **Write** | Only for scores < 80 |
+
+### Example Spreadsheet Layout
 
 ```
-| A (URL)                    | B    | C    | D    | E    | F (Mobile PSI)     | G (Desktop PSI)    |
-|----------------------------|------|------|------|------|--------------------|--------------------|
-| https://example.com        |      |      |      |      | [PSI URL if < 80]  | [PSI URL if < 80]  |
-| https://example.com/about  |      |      |      |      | [PSI URL if < 80]  | [PSI URL if < 80]  |
-| https://example.com/contact|      |      |      |      | [PSI URL if < 80]  | [PSI URL if < 80]  |
+| A (URL)                         | B    | C    | D    | E    | F (Mobile PSI)     | G (Desktop PSI)    |
+|---------------------------------|------|------|------|------|--------------------|--------------------|
+| URL                             |      |      |      |      |                    |                    | <- Row 1 (Header - Skipped)
+| https://example.com             |      |      |      |      | [PSI URL if < 80]  | [PSI URL if < 80]  | <- Row 2 (First URL)
+| https://example.com/about       |      |      |      |      | [PSI URL if < 80]  | [PSI URL if < 80]  | <- Row 3
+| https://example.com/contact     |      |      |      |      | [PSI URL if < 80]  | [PSI URL if < 80]  | <- Row 4
 ```
 
 **Important Notes:**
-- Column A must contain valid URLs (with `http://` or `https://`)
-- The tool starts reading from row 1 (no header row required)
-- Empty cells in column A are skipped
+- **Row 1 is treated as a header and is skipped** - the tool reads from A2:A onwards
+- Column A must contain valid URLs starting with `http://` or `https://`
+- Empty cells in column A are automatically skipped
 - Columns F and G are only populated when scores are below 80 (threshold configurable in code)
+- The tool preserves the exact row numbers when writing PSI URLs
 
 ## How It Works
 
 1. **Authentication**: Authenticates with Google Sheets using the service account credentials
-2. **Read URLs**: Reads all URLs from column A of the specified tab
+2. **Read URLs**: Reads all URLs from column A (starting at row 2, i.e., A2:A) of the specified tab
 3. **Analysis**: For each URL:
    - Launches Cypress to automate PageSpeed Insights
    - Navigates to pagespeed.web.dev
@@ -181,20 +187,25 @@ Your spreadsheet tab should be structured as:
 
 ## Output
 
-The tool provides real-time progress updates:
+The tool provides real-time progress updates and logs to both console and a log file:
 
 ```
+Logging to file: logs\audit_20260202_163038.log
 Authenticating with Google Sheets...
-Reading URLs from spreadsheet tab 'Website 1'...
-Found 5 URLs to analyze.
+Authentication successful
+Reading URLs from spreadsheet tab 'Barranquilla Singles'...
+Successfully read URLs from spreadsheet
+Found 251 URLs to analyze.
 
-[1/5] Analyzing https://example.com...
+[1/251] Analyzing https://barranquillasingles.com...
   Mobile: 92 (PASS)
   Desktop: 95 (PASS)
+Successfully analyzed https://barranquillasingles.com
 
-[2/5] Analyzing https://slow-site.com...
+[2/251] Analyzing https://barranquillasingles.com/about...
   Mobile: 65 (FAIL)
   Desktop: 72 (FAIL)
+Successfully analyzed https://barranquillasingles.com/about
 
 ...
 
@@ -204,20 +215,28 @@ Spreadsheet updated successfully.
 ================================================================================
 AUDIT SUMMARY
 ================================================================================
-Total URLs analyzed: 5
-Successful analyses: 5
-Failed analyses: 0
+Total URLs analyzed: 251
+Successful analyses: 250
+Failed analyses: 1
 
-Mobile scores >= 80: 3
-Mobile scores < 80: 2
-Desktop scores >= 80: 4
-Desktop scores < 80: 1
+Mobile scores >= 80: 180
+Mobile scores < 80: 70
+Desktop scores >= 80: 200
+Desktop scores < 80: 50
 
 PSI URLs for failing scores written to columns F (mobile) and G (desktop).
 ================================================================================
 ```
 
+Logs are saved in the `logs/` directory with timestamps for future reference.
+
 ## Troubleshooting
+
+### Error: UnicodeDecodeError: 'charmap' codec can't decode byte
+
+**Cause**: Windows encoding issue when running subprocess commands.
+
+**Solution**: This has been fixed in the latest version. The code now explicitly uses UTF-8 encoding for subprocess operations.
 
 ### Error: Service account file not found
 
@@ -237,6 +256,15 @@ PSI URLs for failing scores written to columns F (mobile) and G (desktop).
 - Ensure Google Sheets API is enabled in your Google Cloud project
 - Regenerate the service account key if necessary
 
+### Error: Tab 'X' not found in spreadsheet
+
+**Cause**: The tab name doesn't exist or is misspelled.
+
+**Solution**:
+- Run `python list_tabs.py` to see all available tabs
+- Verify the tab name matches exactly (case-sensitive)
+- Ensure the spreadsheet is shared with the service account email
+
 ### Error: Failed to read URLs
 
 **Possible Causes**:
@@ -247,7 +275,7 @@ PSI URLs for failing scores written to columns F (mobile) and G (desktop).
 **Solution**:
 - Verify the spreadsheet ID (found in the URL: `https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit`)
 - Check tab name matches exactly (case-sensitive)
-- Ensure the spreadsheet is shared with the service account email
+- Ensure the spreadsheet is shared with the service account email with **Editor** permissions
 
 ### Error: Timeout - Cypress execution exceeded X seconds
 
@@ -267,6 +295,12 @@ PSI URLs for failing scores written to columns F (mobile) and G (desktop).
 npm install
 ```
 
+If still not working, try:
+```bash
+npm install -g npm
+npm install
+```
+
 ### Error: No new results file found
 
 **Cause**: Cypress ran but didn't generate a results file.
@@ -277,14 +311,18 @@ npm install
 - Verify the URL is accessible
 - Try running manually: `npx cypress open` and check the test
 
-### Cypress test fails with element not found
+### Cypress test fails with "Cypress failed with exit code 1"
 
-**Cause**: PageSpeed Insights website structure may have changed.
+**Possible Causes**:
+- PageSpeed Insights website structure may have changed
+- Network connectivity issues
+- The URL is not accessible or returns an error
 
 **Solution**:
-- This indicates the PageSpeed Insights UI may have been updated
-- Check `cypress/e2e/analyze-url.cy.js` for outdated selectors
-- Update selectors to match current PageSpeed Insights DOM structure
+- Check the detailed error output in the console
+- Verify the URL is accessible in your browser
+- Try running Cypress in headed mode for debugging: `npx cypress open`
+- Check `cypress/e2e/analyze-url.cy.js` for outdated selectors if PageSpeed Insights UI has changed
 
 ### Permission denied when writing to spreadsheet
 
@@ -296,15 +334,6 @@ npm install
 - Find the service account email
 - Change permission to "Editor"
 
-### Invalid spreadsheet ID
-
-**Cause**: The spreadsheet ID format is incorrect.
-
-**Solution**:
-- Get the ID from your spreadsheet URL
-- URL format: `https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit`
-- Copy only the ID portion between `/d/` and `/edit`
-
 ## Configuration
 
 ### Modifying Score Threshold
@@ -312,7 +341,7 @@ npm install
 The default threshold for "failing" scores is 80. To change it, edit `run_audit.py`:
 
 ```python
-SCORE_THRESHOLD = 80  # Change this value
+SCORE_THRESHOLD = 80  # Change this value (e.g., 70, 90)
 ```
 
 ### Changing Column Mappings
@@ -338,52 +367,112 @@ Modify `cypress.config.js` to change:
 ```
 .
 ├── run_audit.py                 # Main entry point
+├── list_tabs.py                 # Utility to list spreadsheet tabs
+├── get_service_account_email.py # Utility to get service account email
 ├── requirements.txt             # Python dependencies
 ├── package.json                 # Node.js dependencies
 ├── cypress.config.js            # Cypress configuration
 ├── service-account.json         # Google Cloud credentials (not in repo)
-├── .env.example                 # Environment variable template
+├── README.md                    # This file
 ├── tools/
 │   ├── sheets/
 │   │   └── sheets_client.py    # Google Sheets API wrapper
-│   └── qa/
-│       └── cypress_runner.py   # Cypress automation wrapper
-└── cypress/
-    ├── e2e/
-    │   └── analyze-url.cy.js   # PageSpeed Insights test
-    └── results/                 # Generated results (gitignored)
+│   ├── qa/
+│   │   └── cypress_runner.py   # Cypress automation wrapper
+│   └── utils/
+│       └── logger.py            # Logging utilities
+├── cypress/
+│   ├── e2e/
+│   │   └── analyze-url.cy.js   # PageSpeed Insights test
+│   └── results/                 # Generated results (gitignored)
+└── logs/                        # Audit logs (gitignored)
 ```
 
 ## Advanced Tips
 
 ### Batch Processing Multiple Tabs
 
-Create a shell script to process multiple tabs:
+**Windows (PowerShell):**
+```powershell
+$tabs = @("Barranquilla Singles", "Website 2", "Website 3")
+foreach ($tab in $tabs) {
+    Write-Host "Processing tab: $tab"
+    python run_audit.py --tab $tab --service-account "service-account.json"
+}
+```
 
+**Linux/Mac (Bash):**
 ```bash
 #!/bin/bash
-tabs=("Website 1" "Website 2" "Website 3")
+tabs=("Barranquilla Singles" "Website 2" "Website 3")
 for tab in "${tabs[@]}"; do
     echo "Processing tab: $tab"
-    python run_audit.py --tab "$tab"
+    python run_audit.py --tab "$tab" --service-account "service-account.json"
 done
 ```
 
 ### Schedule Regular Audits
 
-Use cron (Linux/Mac) or Task Scheduler (Windows) to run audits automatically:
+**Windows (Task Scheduler):**
+1. Open Task Scheduler
+2. Create Basic Task
+3. Set trigger (e.g., weekly on Monday at 9 AM)
+4. Action: Start a program
+5. Program: `python.exe`
+6. Arguments: `run_audit.py --tab "Barranquilla Singles"`
+7. Start in: Project directory path
 
+**Linux/Mac (cron):**
 ```bash
 # Run every Monday at 9 AM
 0 9 * * 1 cd /path/to/project && python run_audit.py --tab "Production Sites"
 ```
 
+## Quick Start Guide
+
+1. **Install Python 3.7+ and Node.js 14+** (if not already installed)
+   - Python: [python.org/downloads](https://www.python.org/downloads/)
+   - Node.js: [nodejs.org](https://nodejs.org/)
+
+2. **Clone/download this project**
+
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   npm install
+   ```
+
+4. **Set up Google Cloud service account:**
+   - Create service account at [console.cloud.google.com](https://console.cloud.google.com/)
+   - Download JSON key and save as `service-account.json` in the project root
+   - Enable Google Sheets API
+   - Share spreadsheet with service account email (found in the JSON file)
+
+5. **Verify setup (optional but recommended):**
+   ```bash
+   python validate_setup.py
+   ```
+
+6. **Run the audit:**
+   ```bash
+   python run_audit.py --tab "Barranquilla Singles" --service-account "service-account.json"
+   ```
+
 ## Limitations
 
 - Requires active internet connection
 - PageSpeed Insights rate limits may apply for high-volume usage
-- Analysis time depends on website complexity and server response time
-- Browser automation depends on PageSpeed Insights UI structure
+- Analysis time depends on website complexity and server response time (typically 30-60 seconds per URL)
+- Browser automation depends on PageSpeed Insights UI structure (may need updates if Google changes their interface)
+- URLs must start from row 2 (row 1 is treated as header)
+
+## Support
+
+For issues or questions:
+1. Check the Troubleshooting section above
+2. Review the logs in the `logs/` directory
+3. Verify all setup steps were completed correctly
+4. Ensure URLs in the spreadsheet are valid and accessible
 
 ## License
 
