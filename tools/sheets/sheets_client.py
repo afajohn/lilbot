@@ -90,3 +90,43 @@ def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: st
         valueInputOption='RAW',
         body=body
     ).execute()
+
+
+def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple[int, str, str]], service=None, service_account_file: Optional[str] = None) -> None:
+    """
+    Batch write PSI URLs to multiple cells in the spreadsheet.
+    
+    Args:
+        spreadsheet_id: The ID of the Google Spreadsheet
+        tab_name: The name of the tab/sheet to write to
+        updates: List of tuples containing (row_index, column, url)
+        service: Optional authenticated service object. If not provided, service_account_file must be provided
+        service_account_file: Optional path to service account JSON file. Used if service is not provided
+    """
+    if not updates:
+        return
+    
+    if service is None:
+        if service_account_file is None:
+            raise ValueError("Either service or service_account_file must be provided")
+        service = authenticate(service_account_file)
+    
+    sheet = service.spreadsheets()
+    
+    data = []
+    for row_index, column, url in updates:
+        range_name = f"{tab_name}!{column}{row_index}"
+        data.append({
+            'range': range_name,
+            'values': [[url]]
+        })
+    
+    body = {
+        'valueInputOption': 'RAW',
+        'data': data
+    }
+    
+    sheet.values().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body=body
+    ).execute()
