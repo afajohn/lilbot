@@ -3,6 +3,8 @@ import json
 import os
 import time
 import glob
+import shutil
+import sys
 from typing import Dict, Optional
 
 
@@ -12,6 +14,34 @@ class CypressRunnerError(Exception):
 
 class CypressTimeoutError(CypressRunnerError):
     pass
+
+
+def _find_npx() -> str:
+    """
+    Find the npx executable, handling Windows vs Unix differences.
+    
+    Returns:
+        Path to npx executable
+        
+    Raises:
+        CypressRunnerError: If npx cannot be found
+    """
+    if sys.platform == 'win32':
+        npx_cmd = shutil.which('npx.cmd')
+        if npx_cmd:
+            return npx_cmd
+        npx_cmd = shutil.which('npx')
+        if npx_cmd:
+            return npx_cmd
+    else:
+        npx_cmd = shutil.which('npx')
+        if npx_cmd:
+            return npx_cmd
+    
+    raise CypressRunnerError(
+        "npx not found. Ensure Node.js is installed and npx is available in PATH. "
+        "Try running 'npm install -g npm' to ensure npx is properly installed."
+    )
 
 
 def run_analysis(url: str, timeout: int = 300, max_retries: int = 2) -> Dict[str, Optional[int | str]]:
@@ -57,6 +87,11 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
     """
     Internal function to run a single Cypress analysis attempt.
     """
+    try:
+        npx_path = _find_npx()
+    except CypressRunnerError:
+        raise
+    
     cypress_env = os.environ.copy()
     cypress_env['CYPRESS_TEST_URL'] = url
     
@@ -68,12 +103,13 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
     
     try:
         result = subprocess.run(
-            ['npx', 'cypress', 'run', '--spec', 'cypress/e2e/analyze-url.cy.js'],
+            [npx_path, 'cypress', 'run', '--spec', 'cypress/e2e/analyze-url.cy.js'],
             cwd=repo_root,
             env=cypress_env,
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=timeout,
+            shell=False
         )
         
         if result.returncode != 0:
@@ -87,7 +123,7 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
     except subprocess.TimeoutExpired as e:
         raise CypressTimeoutError(f"Cypress execution exceeded {timeout} seconds timeout") from e
     except FileNotFoundError as e:
-        raise CypressRunnerError("npx or Cypress not found. Ensure Node.js and Cypress are installed.") from e
+        raise CypressRunnerError(f"Failed to execute npx at '{npx_path}'. Ensure Node.js and Cypress are installed.") from e
     
     time.sleep(1)
     
