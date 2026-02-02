@@ -11,7 +11,7 @@ from qa import cypress_runner
 from utils import logger
 
 
-DEFAULT_SPREADSHEET_ID = '1vF4ySHs3nZVD6hkb8CWH7evRAy2V93DhS3wQ9rO3MhU'
+DEFAULT_SPREADSHEET_ID = '1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I'
 SERVICE_ACCOUNT_FILE = 'service-account.json'
 MOBILE_COLUMN = 'F'
 DESKTOP_COLUMN = 'G'

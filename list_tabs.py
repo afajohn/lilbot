@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
 from sheets import sheets_client
 
 
-DEFAULT_SPREADSHEET_ID = '1vF4ySHs3nZVD6hkb8CWH7evRAy2V93DhS3wQ9rO3MhU'
+DEFAULT_SPREADSHEET_ID = '1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I'
 SERVICE_ACCOUNT_FILE = 'service-account.json'
 
 

@@ -88,7 +88,7 @@ HttpError 404: Requested entity was not found
    
 2. **Check default spreadsheet ID** in `run_audit.py`:
    ```python
-   DEFAULT_SPREADSHEET_ID = '1vF4ySHs3nZVD6hkb8CWH7evRAy2V93DhS3wQ9rO3MhU'
+   DEFAULT_SPREADSHEET_ID = '1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I'
    ```
    Update this if you're using a different spreadsheet.
 
@@ -240,7 +240,7 @@ The `.env` file is **optional**. If you want to use it:
 
 2. **Edit .env:**
    ```
-   GOOGLE_SHEETS_ID=1vF4ySHs3nZVD6hkb8CWH7evRAy2V93DhS3wQ9rO3MhU
+   GOOGLE_SHEETS_ID=1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I
    GOOGLE_SERVICE_ACCOUNT_PATH=service-account.json
    ```
 

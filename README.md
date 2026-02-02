@@ -110,7 +110,7 @@ python run_audit.py --tab "Barranquilla Singles" \
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `--tab` | Yes | - | Name of the spreadsheet tab to read URLs from |
-| `--spreadsheet-id` | No | `1vF4ySHs3nZVD6hkb8CWH7evRAy2V93DhS3wQ9rO3MhU` | Google Spreadsheet ID |
+| `--spreadsheet-id` | No | `1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I` | Google Spreadsheet ID |
 | `--service-account` | No | `service-account.json` | Path to service account JSON file |
 | `--timeout` | No | `300` | Timeout in seconds for each URL analysis |
 
