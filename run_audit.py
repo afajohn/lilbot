@@ -40,8 +40,8 @@ def main():
     parser.add_argument(
         '--timeout',
         type=int,
-        default=300,
-        help='Timeout in seconds for each Cypress run (default: 300)'
+        default=900,
+        help='Timeout in seconds for each Cypress run (default: 900)'
     )
     
     args = parser.parse_args()
@@ -148,11 +148,17 @@ def main():
                 'desktop_psi_url': desktop_psi_url
             })
             
-            if not existing_mobile_psi and mobile_score is not None and mobile_score < SCORE_THRESHOLD and mobile_psi_url:
-                updates.append((row_index, MOBILE_COLUMN, mobile_psi_url))
+            if not existing_mobile_psi and mobile_score is not None:
+                if mobile_score >= SCORE_THRESHOLD:
+                    updates.append((row_index, MOBILE_COLUMN, 'passed'))
+                elif mobile_psi_url:
+                    updates.append((row_index, MOBILE_COLUMN, mobile_psi_url))
             
-            if not existing_desktop_psi and desktop_score is not None and desktop_score < SCORE_THRESHOLD and desktop_psi_url:
-                updates.append((row_index, DESKTOP_COLUMN, desktop_psi_url))
+            if not existing_desktop_psi and desktop_score is not None:
+                if desktop_score >= SCORE_THRESHOLD:
+                    updates.append((row_index, DESKTOP_COLUMN, 'passed'))
+                elif desktop_psi_url:
+                    updates.append((row_index, DESKTOP_COLUMN, desktop_psi_url))
             
             log.info(f"Successfully analyzed {url}")
             
@@ -187,7 +193,7 @@ def main():
         log.info("")
     
     if updates:
-        log.info(f"Updating spreadsheet with {len(updates)} PSI URLs...")
+        log.info(f"Updating spreadsheet with {len(updates)} values...")
         try:
             sheets_client.batch_write_psi_urls(
                 args.spreadsheet_id,
@@ -199,7 +205,7 @@ def main():
         except Exception as e:
             log.error(f"Failed to update spreadsheet: {e}", exc_info=True)
     else:
-        log.info("No failing scores to report.\n")
+        log.info("No updates to write.\n")
     
     log.info("=" * 80)
     log.info("AUDIT SUMMARY")
@@ -234,6 +240,8 @@ def main():
                 log.info(f"    Error: {r['error']}")
         log.info("")
     
+    if mobile_pass > 0 or desktop_pass > 0:
+        log.info(f"Cells with score >= {SCORE_THRESHOLD} marked as 'passed'.")
     if mobile_fail > 0 or desktop_fail > 0:
         log.info(f"PSI URLs for failing scores written to columns {MOBILE_COLUMN} (mobile) and {DESKTOP_COLUMN} (desktop).")
     

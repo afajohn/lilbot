@@ -9,10 +9,10 @@ module.exports = defineConfig({
     screenshotOnRunFailure: false,
     viewportWidth: 1280,
     viewportHeight: 720,
-    defaultCommandTimeout: 10000,
-    pageLoadTimeout: 60000,
-    requestTimeout: 30000,
-    responseTimeout: 30000,
+    defaultCommandTimeout: 30000,
+    pageLoadTimeout: 180000,
+    requestTimeout: 90000,
+    responseTimeout: 90000,
     experimentalStudio: false,
     experimentalWebKitSupport: false,
     setupNodeEvents(on, config) {
@@ -46,7 +46,7 @@ module.exports = defineConfig({
   },
   chromeWebSecurity: false,
   retries: {
-    runMode: 2,
+    runMode: 5,
     openMode: 0
   }
 });

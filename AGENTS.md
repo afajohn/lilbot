@@ -24,6 +24,8 @@ python list_tabs.py --spreadsheet-id "YOUR_ID" --service-account "service-accoun
 **Run Audit:**
 ```bash
 python run_audit.py --tab "TAB_NAME" --service-account "service-account.json"
+# Optional: Specify custom timeout (default: 900 seconds)
+python run_audit.py --tab "TAB_NAME" --timeout 1200
 ```
 
 **Build:** Not applicable (Python script)
@@ -72,10 +74,12 @@ python run_audit.py --tab "TAB_NAME" --service-account "service-account.json"
 1. **Input**: URLs from Google Sheets column A (starting row 2)
 2. **Processing**:
    - `run_audit.py` reads URLs via `sheets_client.py`
-   - For each URL, `cypress_runner.py` launches Cypress
-   - Cypress navigates to PageSpeed Insights and extracts scores
+   - For each URL, `cypress_runner.py` launches Cypress (retries up to 10 times on failure)
+   - Cypress navigates to PageSpeed Insights and extracts scores from `.lh-exp-gauge__percentage`
    - Results saved to JSON files in `cypress/results/`
-3. **Output**: PSI URLs written to columns F (mobile) and G (desktop) for scores < 80
+3. **Output**: 
+   - For scores >= 80: Cell is filled with the text "passed"
+   - For scores < 80: PSI URLs written to columns F (mobile) and G (desktop)
 
 ### Key Components
 
@@ -94,16 +98,20 @@ python run_audit.py --tab "TAB_NAME" --service-account "service-account.json"
 #### cypress_runner.py
 - Finds npx executable
 - Runs Cypress tests with proper encoding (UTF-8)
-- Handles timeouts and retries
+- Handles timeouts and retries (up to 10 retry attempts with exponential backoff)
 - Parses JSON results
+- Default timeout: 900 seconds (15 minutes)
 - **Critical Fix**: Uses `encoding='utf-8', errors='replace'` to prevent Windows UnicodeDecodeError
 
 #### analyze-url.cy.js
 - Cypress test that automates PageSpeed Insights
 - Visits pagespeed.web.dev
 - Enters URL and runs mobile/desktop analysis
-- Extracts scores and report URLs
+- Extracts scores from `.lh-exp-gauge__percentage` text
+- Collects report URLs for scores < 80
 - Saves results to JSON
+- Configured with 5 automatic retries on failure
+- Tripled timeout values (defaultCommandTimeout: 30s, pageLoadTimeout: 180s)
 
 #### logger.py
 - Sets up logging to both console and file
@@ -143,7 +151,10 @@ URLs are read from `A2:A` (not `A:A`) to skip the header row. Row enumeration st
 - Continue processing remaining URLs even if one fails
 
 ### Retry Logic
-Cypress runs can fail transiently. The runner retries up to 2 times before giving up.
+Cypress runs can fail transiently. The system has multiple layers of retry:
+- Cypress internal retries: 5 attempts per run (configured in cypress.config.js)
+- Python runner retries: Up to 10 attempts with exponential backoff (5s, 10s, 15s, up to 30s)
+- Total possible attempts: Up to 60 (5 × 10 + initial attempt)
 
 ### Results File Management
 - Each Cypress run generates a timestamped JSON file
@@ -155,9 +166,10 @@ Cypress runs can fail transiently. The runner retries up to 2 times before givin
 ### Constants in run_audit.py
 - `DEFAULT_SPREADSHEET_ID`: Default Google Sheets ID
 - `SERVICE_ACCOUNT_FILE`: Default service account path
-- `MOBILE_COLUMN`: Column for mobile PSI URLs (default: 'F')
-- `DESKTOP_COLUMN`: Column for desktop PSI URLs (default: 'G')
+- `MOBILE_COLUMN`: Column for mobile results (default: 'F')
+- `DESKTOP_COLUMN`: Column for desktop results (default: 'G')
 - `SCORE_THRESHOLD`: Minimum passing score (default: 80)
+- Default timeout: 900 seconds (can be overridden with --timeout flag)
 
 ### Environment Variables
 Not currently used, but the code supports them via python-dotenv.
@@ -177,10 +189,16 @@ Edit `SCORE_THRESHOLD` in `run_audit.py`.
 If PageSpeed Insights UI changes:
 1. Edit `cypress/e2e/analyze-url.cy.js`
 2. Update selectors to match new DOM structure
-3. Test with `npx cypress open`
+3. Current key selectors:
+   - Analyze button: `button` containing text matching `/analyze/i`
+   - Score display: `.lh-exp-gauge__percentage` (extracts text directly)
+   - Mobile/Desktop toggle: `button` containing 'Mobile' or 'Desktop'
+4. Test with `npx cypress open`
 
 ### Adding More Retry Attempts
-Modify `max_retries` parameter in `cypress_runner.py` `run_analysis()` function.
+1. Modify `max_retries` parameter in `cypress_runner.py` `run_analysis()` function (default: 10)
+2. Modify `retries.runMode` in `cypress.config.js` (default: 5)
+3. Adjust timeout with `--timeout` flag when running `run_audit.py` (default: 900 seconds)
 
 ## Testing
 

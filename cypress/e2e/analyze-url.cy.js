@@ -20,21 +20,21 @@ describe('PageSpeed URL Analysis', () => {
   it('should analyze URL on PageSpeed Insights for Mobile and Desktop', () => {
     cy.visit('/');
     
-    cy.get('input[name="url"]', { timeout: 10000 }).should('be.visible').clear().type(testUrl);
+    cy.get('input[name="url"]', { timeout: 30000 }).should('be.visible').clear().type(testUrl);
     
-    cy.get('button[type="submit"]').click();
+    cy.get('button').contains(/analyze/i, { timeout: 30000 }).should('be.visible').click();
     
     cy.wait(15000);
     
-    cy.get('.lh-exp-gauge__arc', { timeout: 60000 }).should('exist');
+    cy.get('.lh-exp-gauge__percentage', { timeout: 180000 }).should('exist');
     
-    cy.get('button').contains('Mobile', { matchCase: false }).click();
+    cy.get('button').contains('Mobile', { matchCase: false, timeout: 30000 }).click();
     
-    cy.wait(2000);
+    cy.wait(5000);
     
-    cy.get('.lh-exp-gauge__arc').first().invoke('attr', 'stroke-dasharray').then((dashArray) => {
-      const score = parseFloat(dashArray.split(',')[0]) / 352 * 100;
-      results.mobile.score = Math.round(score);
+    cy.get('.lh-exp-gauge__percentage', { timeout: 30000 }).first().invoke('text').then((text) => {
+      const score = parseInt(text.trim());
+      results.mobile.score = score;
       
       if (results.mobile.score < 80) {
         cy.url().then((url) => {
@@ -43,13 +43,13 @@ describe('PageSpeed URL Analysis', () => {
       }
     });
     
-    cy.get('button').contains('Desktop', { matchCase: false }).click();
+    cy.get('button').contains('Desktop', { matchCase: false, timeout: 30000 }).click();
     
-    cy.wait(2000);
+    cy.wait(5000);
     
-    cy.get('.lh-exp-gauge__arc').first().invoke('attr', 'stroke-dasharray').then((dashArray) => {
-      const score = parseFloat(dashArray.split(',')[0]) / 352 * 100;
-      results.desktop.score = Math.round(score);
+    cy.get('.lh-exp-gauge__percentage', { timeout: 30000 }).first().invoke('text').then((text) => {
+      const score = parseInt(text.trim());
+      results.desktop.score = score;
       
       if (results.desktop.score < 80) {
         cy.url().then((url) => {

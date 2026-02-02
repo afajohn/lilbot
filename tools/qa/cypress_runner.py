@@ -44,14 +44,14 @@ def _find_npx() -> str:
     )
 
 
-def run_analysis(url: str, timeout: int = 300, max_retries: int = 2) -> Dict[str, Optional[int | str]]:
+def run_analysis(url: str, timeout: int = 900, max_retries: int = 10) -> Dict[str, Optional[int | str]]:
     """
     Run Cypress analysis for a given URL to get PageSpeed Insights scores.
     
     Args:
         url: The URL to analyze
-        timeout: Maximum time in seconds to wait for Cypress to complete (default: 300)
-        max_retries: Maximum number of retry attempts for transient errors (default: 2)
+        timeout: Maximum time in seconds to wait for Cypress to complete (default: 900)
+        max_retries: Maximum number of retry attempts for transient errors (default: 10)
         
     Returns:
         Dictionary with keys:
@@ -73,7 +73,8 @@ def run_analysis(url: str, timeout: int = 300, max_retries: int = 2) -> Dict[str
         except (CypressRunnerError, FileNotFoundError) as e:
             last_exception = e
             if attempt < max_retries:
-                time.sleep(2)
+                wait_time = min(5 * (attempt + 1), 30)
+                time.sleep(wait_time)
                 continue
             raise
         except CypressTimeoutError:
@@ -114,14 +115,6 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
             shell=False
         )
         
-        if result.returncode != 0:
-            error_msg = f"Cypress failed with exit code {result.returncode}"
-            if result.stderr:
-                error_msg += f"\nStderr: {result.stderr}"
-            if result.stdout:
-                error_msg += f"\nStdout: {result.stdout}"
-            raise CypressRunnerError(error_msg)
-            
     except subprocess.TimeoutExpired as e:
         raise CypressTimeoutError(f"Cypress execution exceeded {timeout} seconds timeout") from e
     except FileNotFoundError as e:
@@ -133,6 +126,13 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
     result_files = new_results - existing_results
     
     if not result_files:
+        if result.returncode != 0:
+            error_msg = f"Cypress failed with exit code {result.returncode} and no results file was generated"
+            if result.stderr:
+                error_msg += f"\nStderr: {result.stderr}"
+            if result.stdout:
+                error_msg += f"\nStdout: {result.stdout}"
+            raise CypressRunnerError(error_msg)
         raise FileNotFoundError(f"No new results file found in {results_dir}")
     
     result_file = sorted(result_files)[-1]
@@ -148,9 +148,15 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
     mobile_data = results.get('mobile', {})
     desktop_data = results.get('desktop', {})
     
+    mobile_score = mobile_data.get('score')
+    desktop_score = desktop_data.get('score')
+    
+    if mobile_score is None or desktop_score is None:
+        raise CypressRunnerError("Results file is missing score data")
+    
     return {
-        'mobile_score': mobile_data.get('score'),
-        'desktop_score': desktop_data.get('score'),
+        'mobile_score': mobile_score,
+        'desktop_score': desktop_score,
         'mobile_psi_url': mobile_data.get('reportUrl'),
         'desktop_psi_url': desktop_data.get('reportUrl')
     }
