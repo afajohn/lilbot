@@ -78,10 +78,10 @@ def list_tabs(spreadsheet_id: str, service=None, service_account_file: Optional[
         raise
 
 
-def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_file: Optional[str] = None) -> List[Tuple[int, str, Optional[str], Optional[str]]]:
+def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_file: Optional[str] = None) -> List[Tuple[int, str, Optional[str], Optional[str], bool]]:
     """
     Read URLs from column A of a spreadsheet tab, starting from row 2 (skipping header).
-    Also reads existing PSI URLs from columns F and G.
+    Also reads existing PSI URLs from columns F and G and checks for skip conditions.
     
     Args:
         spreadsheet_id: The ID of the Google Spreadsheet
@@ -90,7 +90,9 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
         service_account_file: Optional path to service account JSON file. Used if service is not provided
         
     Returns:
-        List of tuples containing (row_index, url, mobile_psi_url, desktop_psi_url) where row_index is 1-based
+        List of tuples containing (row_index, url, mobile_psi_url, desktop_psi_url, should_skip) where:
+        - row_index is 1-based
+        - should_skip is True if either F or G cell contains "passed" or has background color #b7e1cd
         
     Raises:
         ValueError: If tab doesn't exist or spreadsheet is not accessible
@@ -108,6 +110,12 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
         result = sheet.values().get(
             spreadsheetId=spreadsheet_id,
             range=range_name
+        ).execute()
+        
+        spreadsheet_data = sheet.get(
+            spreadsheetId=spreadsheet_id,
+            ranges=[range_name],
+            fields='sheets(data(rowData(values(effectiveFormat(backgroundColor),formattedValue))))'
         ).execute()
     except HttpError as e:
         if e.resp.status == 404:
@@ -127,6 +135,12 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
     
     values = result.get('values', [])
     
+    row_data = []
+    sheets_data = spreadsheet_data.get('sheets', [])
+    if sheets_data and 'data' in sheets_data[0]:
+        sheet_data = sheets_data[0]['data'][0]
+        row_data = sheet_data.get('rowData', [])
+    
     urls = []
     for idx, row in enumerate(values, start=2):
         if row and row[0]:
@@ -134,9 +148,77 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
             if url:
                 mobile_psi_url = row[5].strip() if len(row) > 5 and row[5] else None
                 desktop_psi_url = row[6].strip() if len(row) > 6 and row[6] else None
-                urls.append((idx, url, mobile_psi_url, desktop_psi_url))
+                
+                should_skip = _check_skip_conditions(row_data, idx - 2, row)
+                
+                urls.append((idx, url, mobile_psi_url, desktop_psi_url, should_skip))
     
     return urls
+
+
+def _check_skip_conditions(row_data: List, row_idx: int, row_values: List) -> bool:
+    """
+    Check if a row should be skipped based on:
+    1. Cells F or G containing the word "passed"
+    2. Cells F or G having background color #b7e1cd
+    
+    Args:
+        row_data: Formatted row data from the spreadsheet
+        row_idx: Index in the row_data list (0-based)
+        row_values: Raw values from the row
+        
+    Returns:
+        True if the row should be skipped, False otherwise
+    """
+    mobile_value = row_values[5] if len(row_values) > 5 else None
+    desktop_value = row_values[6] if len(row_values) > 6 else None
+    
+    if mobile_value and 'passed' in str(mobile_value).lower():
+        return True
+    if desktop_value and 'passed' in str(desktop_value).lower():
+        return True
+    
+    if row_idx < len(row_data):
+        row_cells = row_data[row_idx].get('values', [])
+        
+        if len(row_cells) > 5:
+            mobile_cell = row_cells[5]
+            if _has_target_background_color(mobile_cell):
+                return True
+        
+        if len(row_cells) > 6:
+            desktop_cell = row_cells[6]
+            if _has_target_background_color(desktop_cell):
+                return True
+    
+    return False
+
+
+def _has_target_background_color(cell: dict) -> bool:
+    """
+    Check if a cell has the target background color #b7e1cd.
+    
+    Args:
+        cell: Cell data with formatting information
+        
+    Returns:
+        True if the cell has background color #b7e1cd, False otherwise
+    """
+    if 'effectiveFormat' in cell and 'backgroundColor' in cell['effectiveFormat']:
+        bg_color = cell['effectiveFormat']['backgroundColor']
+        
+        red = bg_color.get('red', 0)
+        green = bg_color.get('green', 0)
+        blue = bg_color.get('blue', 0)
+        
+        red_int = int(red * 255)
+        green_int = int(green * 255)
+        blue_int = int(blue * 255)
+        
+        if red_int == 0xb7 and green_int == 0xe1 and blue_int == 0xcd:
+            return True
+    
+    return False
 
 
 def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: str, url: str, service=None, service_account_file: Optional[str] = None) -> None:

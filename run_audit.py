@@ -96,7 +96,18 @@ def main():
     updates = []
     skipped_count = 0
     
-    for idx, (row_index, url, existing_mobile_psi, existing_desktop_psi) in enumerate(urls, start=1):
+    for idx, (row_index, url, existing_mobile_psi, existing_desktop_psi, should_skip) in enumerate(urls, start=1):
+        if should_skip:
+            log.info(f"[{idx}/{len(urls)}] Skipping {url} (contains 'passed' or has green background in column F or G)")
+            skipped_count += 1
+            results.append({
+                'row': row_index,
+                'url': url,
+                'skipped': True
+            })
+            log.info("")
+            continue
+        
         if existing_mobile_psi and existing_desktop_psi:
             log.info(f"[{idx}/{len(urls)}] Skipping {url} (both columns F and G already filled)")
             skipped_count += 1
@@ -205,7 +216,7 @@ def main():
     desktop_fail = sum(1 for r in results if r.get('desktop_score') is not None and r['desktop_score'] < SCORE_THRESHOLD)
     
     log.info(f"Total URLs found: {total_urls}")
-    log.info(f"URLs skipped (both columns filled): {skipped}")
+    log.info(f"URLs skipped: {skipped}")
     log.info(f"URLs analyzed: {analyzed}")
     log.info(f"Failed analyses: {failed}")
     log.info("")
