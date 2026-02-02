@@ -1,4 +1,6 @@
 const { defineConfig } = require('cypress');
+const fs = require('fs');
+const path = require('path');
 
 module.exports = defineConfig({
   e2e: {
@@ -14,6 +16,24 @@ module.exports = defineConfig({
     experimentalStudio: false,
     experimentalWebKitSupport: false,
     setupNodeEvents(on, config) {
+      on('task', {
+        writeResults(results) {
+          const resultsDir = path.join(process.cwd(), 'cypress', 'results');
+          
+          if (!fs.existsSync(resultsDir)) {
+            fs.mkdirSync(resultsDir, { recursive: true });
+          }
+          
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const filename = `pagespeed-results-${timestamp}.json`;
+          const filepath = path.join(resultsDir, filename);
+          
+          fs.writeFileSync(filepath, JSON.stringify(results, null, 2));
+          
+          return { filename, filepath };
+        }
+      });
+      
       return config;
     },
     reporter: 'json',

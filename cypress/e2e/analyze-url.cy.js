@@ -1,6 +1,3 @@
-const fs = require('fs');
-const path = require('path');
-
 describe('PageSpeed URL Analysis', () => {
   let testUrl;
   let results = {
@@ -63,18 +60,8 @@ describe('PageSpeed URL Analysis', () => {
   });
 
   after(() => {
-    const resultsDir = path.join(process.cwd(), 'cypress', 'results');
-    
-    if (!fs.existsSync(resultsDir)) {
-      fs.mkdirSync(resultsDir, { recursive: true });
-    }
-    
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `pagespeed-results-${timestamp}.json`;
-    const filepath = path.join(resultsDir, filename);
-    
-    fs.writeFileSync(filepath, JSON.stringify(results, null, 2));
-    
-    cy.log(`Results written to ${filename}`);
+    cy.task('writeResults', results).then((fileInfo) => {
+      cy.log(`Results written to ${fileInfo.filename}`);
+    });
   });
 });
