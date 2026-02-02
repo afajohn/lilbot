@@ -2,9 +2,30 @@
 
 Automated tool for running PageSpeed Insights audits on URLs from Google Sheets and writing results back to the spreadsheet.
 
+## Documentation
+
+- **[QUICK_START.md](QUICK_START.md)** - Get started in 5 minutes
+- **[SETUP_GUIDE.md](SETUP_GUIDE.md)** - Complete setup instructions  
+- **[ERROR_REFERENCE.md](ERROR_REFERENCE.md)** - Quick error solutions
+- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Detailed troubleshooting
+- **README.md** (this file) - Full feature documentation
+
 ## Overview
 
 This tool reads URLs from a Google Spreadsheet, analyzes each URL using PageSpeed Insights (via Cypress automation), and writes PageSpeed report URLs back to the spreadsheet for URLs with scores below 80.
+
+## Quick Commands
+
+```bash
+# Validate your setup
+python validate_setup.py
+
+# List available tabs
+python list_tabs.py
+
+# Run audit
+python run_audit.py --tab "TAB_NAME"
+```
 
 ## Prerequisites
 
@@ -217,7 +238,30 @@ PSI URLs for failing scores written to columns F (mobile) and G (desktop).
 ================================================================================
 ```
 
+## Quick Start
+
+After setup, use these commands:
+
+```bash
+# 1. List all available tabs in your spreadsheet
+python list_tabs.py
+
+# 2. Run audit on a specific tab
+python run_audit.py --tab "TAB_NAME"
+```
+
 ## Troubleshooting
+
+**For detailed troubleshooting, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)**
+
+### Quick Fixes
+
+#### Error: Tab not found
+
+Run `python list_tabs.py` to see all available tab names, then use the exact name:
+```bash
+python run_audit.py --tab "Exact Tab Name"
+```
 
 ### Error: Service account file not found
 

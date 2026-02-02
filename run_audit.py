@@ -56,6 +56,18 @@ def main():
     try:
         service = sheets_client.authenticate(args.service_account)
         log.info("Authentication successful")
+    except FileNotFoundError as e:
+        log.error(f"\n{e}")
+        log.error("\nSetup Instructions:")
+        log.error("1. Go to https://console.cloud.google.com/")
+        log.error("2. Create a service account and download the JSON key")
+        log.error(f"3. Save it as '{args.service_account}' in the project root")
+        log.error("4. Enable Google Sheets API in your project")
+        log.error("5. Share your spreadsheet with the service account email")
+        sys.exit(1)
+    except ValueError as e:
+        log.error(f"Authentication error: {e}")
+        sys.exit(1)
     except Exception as e:
         log.error(f"Failed to authenticate: {e}", exc_info=True)
         sys.exit(1)
@@ -64,6 +76,12 @@ def main():
     try:
         urls = sheets_client.read_urls(args.spreadsheet_id, args.tab, service=service)
         log.info(f"Successfully read URLs from spreadsheet")
+    except ValueError as e:
+        log.error(f"\n{e}")
+        sys.exit(1)
+    except PermissionError as e:
+        log.error(f"\n{e}")
+        sys.exit(1)
     except Exception as e:
         log.error(f"Failed to read URLs: {e}", exc_info=True)
         sys.exit(1)

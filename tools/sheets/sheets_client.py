@@ -1,5 +1,6 @@
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from typing import List, Tuple, Optional
 
 
@@ -15,12 +16,66 @@ def authenticate(service_account_file: str):
         
     Returns:
         Authorized Google Sheets service object
+        
+    Raises:
+        FileNotFoundError: If service account file doesn't exist
+        ValueError: If service account file is invalid
     """
-    credentials = service_account.Credentials.from_service_account_file(
-        service_account_file, scopes=SCOPES
-    )
-    service = build('sheets', 'v4', credentials=credentials)
-    return service
+    import os
+    if not os.path.exists(service_account_file):
+        raise FileNotFoundError(
+            f"Service account file not found: {service_account_file}\n"
+            f"Please download your service account JSON file from Google Cloud Console "
+            f"and save it as '{service_account_file}'"
+        )
+    
+    try:
+        credentials = service_account.Credentials.from_service_account_file(
+            service_account_file, scopes=SCOPES
+        )
+        service = build('sheets', 'v4', credentials=credentials)
+        return service
+    except Exception as e:
+        raise ValueError(f"Invalid service account file: {e}")
+
+
+def list_tabs(spreadsheet_id: str, service=None, service_account_file: Optional[str] = None) -> List[str]:
+    """
+    List all available tabs in a spreadsheet.
+    
+    Args:
+        spreadsheet_id: The ID of the Google Spreadsheet
+        service: Optional authenticated service object
+        service_account_file: Optional path to service account JSON file
+        
+    Returns:
+        List of tab names
+    """
+    if service is None:
+        if service_account_file is None:
+            raise ValueError("Either service or service_account_file must be provided")
+        service = authenticate(service_account_file)
+    
+    try:
+        sheet = service.spreadsheets()
+        spreadsheet = sheet.get(spreadsheetId=spreadsheet_id).execute()
+        sheets = spreadsheet.get('sheets', [])
+        return [s['properties']['title'] for s in sheets]
+    except HttpError as e:
+        if e.resp.status == 404:
+            raise ValueError(
+                f"Spreadsheet not found (ID: {spreadsheet_id}).\n"
+                f"Please verify:\n"
+                f"  1. The spreadsheet ID is correct\n"
+                f"  2. The spreadsheet exists\n"
+                f"  3. Your service account has access to this spreadsheet"
+            )
+        elif e.resp.status == 403:
+            raise PermissionError(
+                f"Access denied to spreadsheet (ID: {spreadsheet_id}).\n"
+                f"Please share the spreadsheet with your service account email."
+            )
+        raise
 
 
 def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_file: Optional[str] = None) -> List[Tuple[int, str]]:
@@ -35,6 +90,10 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
         
     Returns:
         List of tuples containing (row_index, url) where row_index is 1-based
+        
+    Raises:
+        ValueError: If tab doesn't exist or spreadsheet is not accessible
+        PermissionError: If service account doesn't have access
     """
     if service is None:
         if service_account_file is None:
@@ -44,17 +103,35 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
     sheet = service.spreadsheets()
     range_name = f"{tab_name}!A:A"
     
-    result = sheet.values().get(
-        spreadsheetId=spreadsheet_id,
-        range=range_name
-    ).execute()
+    try:
+        result = sheet.values().get(
+            spreadsheetId=spreadsheet_id,
+            range=range_name
+        ).execute()
+    except HttpError as e:
+        if e.resp.status == 404:
+            available_tabs = list_tabs(spreadsheet_id, service=service)
+            error_msg = f"Tab '{tab_name}' not found in spreadsheet.\n"
+            if available_tabs:
+                error_msg += f"Available tabs: {', '.join(available_tabs)}"
+            else:
+                error_msg += "No tabs found in spreadsheet."
+            raise ValueError(error_msg)
+        elif e.resp.status == 403:
+            raise PermissionError(
+                f"Access denied to spreadsheet (ID: {spreadsheet_id}).\n"
+                f"Please share the spreadsheet with your service account email."
+            )
+        raise
     
     values = result.get('values', [])
     
     urls = []
     for idx, row in enumerate(values, start=1):
         if row and row[0]:
-            urls.append((idx, row[0]))
+            url = row[0].strip()
+            if url:
+                urls.append((idx, url))
     
     return urls
 

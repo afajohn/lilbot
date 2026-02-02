@@ -53,6 +53,10 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.venv/
+venv/
+ENV/
+env/
 
 # Google Service Account credentials
 *service-account*.json
