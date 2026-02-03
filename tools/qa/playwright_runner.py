@@ -3,14 +3,18 @@ import os
 import threading
 import traceback
 import psutil
-from typing import Dict, Optional, Set, List
+import asyncio
+import sys
+from typing import Dict, Optional, Set, List, Any, Callable, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from queue import Queue, Empty
 from datetime import datetime
+from concurrent.futures import Future
+from collections import defaultdict
 
 try:
-    from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, Route, Request
+    from playwright.async_api import async_playwright, Browser, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, Route, Request, Playwright
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
@@ -91,6 +95,21 @@ def get_debug_mode() -> bool:
     return DEBUG_MODE
 
 
+def _get_thread_info() -> str:
+    """Get current thread ID and name for logging"""
+    thread = threading.current_thread()
+    return f"[Thread-{thread.ident}:{thread.name}]"
+
+
+def _log_thread_operation(logger, operation: str, details: str = ""):
+    """Log an operation with thread information"""
+    thread_info = _get_thread_info()
+    msg = f"{thread_info} {operation}"
+    if details:
+        msg += f" - {details}"
+    logger.debug(msg)
+
+
 def _get_timestamp_filename(url: str, suffix: str = "") -> str:
     """
     Generate a filename with timestamp and sanitized URL.
@@ -113,7 +132,7 @@ def _get_timestamp_filename(url: str, suffix: str = "") -> str:
     return f"{timestamp}_{sanitized_url}"
 
 
-def _save_debug_screenshot(page: Page, url: str, reason: str = "error") -> Optional[str]:
+async def _save_debug_screenshot(page: Page, url: str, reason: str = "error") -> Optional[str]:
     """
     Capture and save a screenshot for debugging purposes.
     
@@ -132,7 +151,7 @@ def _save_debug_screenshot(page: Page, url: str, reason: str = "error") -> Optio
         filename = _get_timestamp_filename(url, f"screenshot_{reason}")
         filepath = os.path.join(DEBUG_SCREENSHOTS_DIR, f"{filename}.png")
         
-        page.screenshot(path=filepath, full_page=True)
+        await page.screenshot(path=filepath, full_page=True)
         return filepath
     except Exception as e:
         logger = get_logger()
@@ -140,7 +159,7 @@ def _save_debug_screenshot(page: Page, url: str, reason: str = "error") -> Optio
         return None
 
 
-def _save_debug_html(page: Page, url: str, reason: str = "error") -> Optional[str]:
+async def _save_debug_html(page: Page, url: str, reason: str = "error") -> Optional[str]:
     """
     Save page HTML for debugging purposes.
     
@@ -159,7 +178,7 @@ def _save_debug_html(page: Page, url: str, reason: str = "error") -> Optional[st
         filename = _get_timestamp_filename(url, f"page_{reason}")
         filepath = os.path.join(DEBUG_SCREENSHOTS_DIR, f"{filename}.html")
         
-        html_content = page.content()
+        html_content = await page.content()
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
@@ -170,7 +189,7 @@ def _save_debug_html(page: Page, url: str, reason: str = "error") -> Optional[st
         return None
 
 
-def _get_page_info(page: Page) -> Dict[str, any]:
+async def _get_page_info(page: Page) -> Dict[str, any]:
     """
     Extract diagnostic information from the current page.
     
@@ -194,52 +213,63 @@ def _get_page_info(page: Page) -> Dict[str, any]:
         pass
     
     try:
-        info['title'] = page.title()
+        info['title'] = await page.title()
     except Exception:
         pass
     
     try:
-        buttons = page.locator('button').all()
-        info['buttons'] = [
-            {
-                'text': btn.inner_text()[:50] if btn.is_visible() else '[hidden]',
-                'visible': btn.is_visible()
-            }
-            for btn in buttons[:10]
-        ]
+        buttons = await page.locator('button').all()
+        for btn in buttons[:10]:
+            try:
+                is_visible = await btn.is_visible()
+                text = await btn.inner_text() if is_visible else '[hidden]'
+                info['buttons'].append({
+                    'text': text[:50],
+                    'visible': is_visible
+                })
+            except Exception:
+                pass
     except Exception:
         pass
     
     try:
-        inputs = page.locator('input').all()
-        info['inputs'] = [
-            {
-                'type': inp.get_attribute('type'),
-                'placeholder': inp.get_attribute('placeholder'),
-                'visible': inp.is_visible()
-            }
-            for inp in inputs[:10]
-        ]
+        inputs = await page.locator('input').all()
+        for inp in inputs[:10]:
+            try:
+                is_visible = await inp.is_visible()
+                inp_type = await inp.get_attribute('type')
+                placeholder = await inp.get_attribute('placeholder')
+                info['inputs'].append({
+                    'type': inp_type,
+                    'placeholder': placeholder,
+                    'visible': is_visible
+                })
+            except Exception:
+                pass
     except Exception:
         pass
     
     try:
-        links = page.locator('a').all()
-        info['links'] = [
-            {
-                'text': link.inner_text()[:50] if link.is_visible() else '[hidden]',
-                'href': link.get_attribute('href'),
-                'visible': link.is_visible()
-            }
-            for link in links[:10]
-        ]
+        links = await page.locator('a').all()
+        for link in links[:10]:
+            try:
+                is_visible = await link.is_visible()
+                text = await link.inner_text() if is_visible else '[hidden]'
+                href = await link.get_attribute('href')
+                info['links'].append({
+                    'text': text[:50],
+                    'href': href,
+                    'visible': is_visible
+                })
+            except Exception:
+                pass
     except Exception:
         pass
     
     return info
 
 
-def _create_enhanced_error_message(
+async def _create_enhanced_error_message(
     base_message: str,
     url: str,
     page: Optional[Page] = None,
@@ -267,7 +297,7 @@ def _create_enhanced_error_message(
         parts.append(f"\nLast successful step: {last_successful_step}")
     
     if page:
-        page_info = _get_page_info(page)
+        page_info = await _get_page_info(page)
         
         if page_info['url']:
             parts.append(f"\nCurrent page URL: {page_info['url']}")
@@ -296,6 +326,140 @@ def _create_enhanced_error_message(
         parts.append(f"Debug HTML saved: {html_path}")
     
     return '\n'.join(parts)
+
+
+@dataclass
+class ThreadingMetrics:
+    """Track threading-related metrics and issues"""
+    greenlet_errors: int = 0
+    thread_conflicts: int = 0
+    event_loop_failures: int = 0
+    browser_context_creation_threads: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    page_creation_threads: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    async_operation_threads: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    lock = threading.Lock()
+    
+    def record_greenlet_error(self):
+        """Record a greenlet-related error"""
+        with self.lock:
+            self.greenlet_errors += 1
+    
+    def record_thread_conflict(self):
+        """Record a thread conflict"""
+        with self.lock:
+            self.thread_conflicts += 1
+    
+    def record_event_loop_failure(self):
+        """Record an event loop failure"""
+        with self.lock:
+            self.event_loop_failures += 1
+    
+    def record_context_creation(self, thread_id: int):
+        """Record browser context creation on a thread"""
+        with self.lock:
+            self.browser_context_creation_threads[thread_id] += 1
+    
+    def record_page_creation(self, thread_id: int):
+        """Record page creation on a thread"""
+        with self.lock:
+            self.page_creation_threads[thread_id] += 1
+    
+    def record_async_operation(self, thread_id: int):
+        """Record async operation on a thread"""
+        with self.lock:
+            self.async_operation_threads[thread_id] += 1
+    
+    def get_metrics(self) -> Dict:
+        """Get all threading metrics"""
+        with self.lock:
+            return {
+                'greenlet_errors': self.greenlet_errors,
+                'thread_conflicts': self.thread_conflicts,
+                'event_loop_failures': self.event_loop_failures,
+                'context_creation_by_thread': dict(self.browser_context_creation_threads),
+                'page_creation_by_thread': dict(self.page_creation_threads),
+                'async_operations_by_thread': dict(self.async_operation_threads)
+            }
+    
+    def reset(self):
+        """Reset all metrics"""
+        with self.lock:
+            self.greenlet_errors = 0
+            self.thread_conflicts = 0
+            self.event_loop_failures = 0
+            self.browser_context_creation_threads.clear()
+            self.page_creation_threads.clear()
+            self.async_operation_threads.clear()
+
+
+_threading_metrics = ThreadingMetrics()
+
+
+def get_threading_metrics() -> Dict:
+    """Get current threading metrics"""
+    return _threading_metrics.get_metrics()
+
+
+def reset_threading_metrics():
+    """Reset threading metrics"""
+    _threading_metrics.reset()
+
+
+@dataclass
+class EventLoopHealth:
+    """Track event loop health status"""
+    last_heartbeat: float = 0.0
+    heartbeat_failures: int = 0
+    is_responsive: bool = True
+    thread_id: Optional[int] = None
+    lock = threading.Lock()
+    
+    def update_heartbeat(self):
+        """Update last heartbeat timestamp"""
+        with self.lock:
+            self.last_heartbeat = time.time()
+            self.is_responsive = True
+            self.heartbeat_failures = 0
+    
+    def record_failure(self):
+        """Record a heartbeat failure"""
+        with self.lock:
+            self.heartbeat_failures += 1
+            if self.heartbeat_failures >= 3:
+                self.is_responsive = False
+    
+    def check_health(self, timeout_seconds: float = 30.0) -> Tuple[bool, str]:
+        """
+        Check if event loop is healthy
+        
+        Returns:
+            Tuple of (is_healthy, status_message)
+        """
+        with self.lock:
+            if self.last_heartbeat == 0.0:
+                return True, "Event loop not yet initialized"
+            
+            time_since_heartbeat = time.time() - self.last_heartbeat
+            
+            if time_since_heartbeat > timeout_seconds:
+                return False, f"Event loop unresponsive for {time_since_heartbeat:.1f}s"
+            
+            if not self.is_responsive:
+                return False, f"Event loop marked as unresponsive after {self.heartbeat_failures} failures"
+            
+            return True, f"Healthy (last heartbeat {time_since_heartbeat:.1f}s ago)"
+    
+    def get_status(self) -> Dict:
+        """Get detailed health status"""
+        with self.lock:
+            time_since_heartbeat = time.time() - self.last_heartbeat if self.last_heartbeat > 0.0 else None
+            return {
+                'last_heartbeat': self.last_heartbeat,
+                'time_since_heartbeat': time_since_heartbeat,
+                'heartbeat_failures': self.heartbeat_failures,
+                'is_responsive': self.is_responsive,
+                'thread_id': self.thread_id
+            }
 
 
 @dataclass
@@ -417,43 +581,251 @@ class PlaywrightInstance:
             return 0.0
         return self.total_page_load_time / self.total_analyses
     
-    def kill(self):
+    async def kill(self):
         if self.browser and self.is_alive():
             try:
                 if self.context:
-                    self.context.close()
-                self.browser.close()
+                    await self.context.close()
+                await self.browser.close()
             except Exception:
                 pass
         self.state = InstanceState.DEAD
+
+
+@dataclass
+class AnalysisRequest:
+    """Request to analyze a URL"""
+    url: str
+    timeout: int
+    force_retry: bool
+    future: Future
+
+
+class PlaywrightEventLoopThread:
+    """Dedicated thread for running Playwright with its own event loop"""
+    
+    def __init__(self):
+        self.thread = None
+        self.loop = None
+        self.request_queue: Queue[Optional[AnalysisRequest]] = Queue()
+        self._shutdown = False
+        self.logger = get_logger()
+        self._playwright: Optional[Playwright] = None
+        self._pool: Optional['PlaywrightPool'] = None
+        self._health = EventLoopHealth()
+        self._heartbeat_task = None
+        
+    def start(self):
+        """Start the event loop thread"""
+        if self.thread is None or not self.thread.is_alive():
+            self._shutdown = False
+            self.thread = threading.Thread(target=self._run_event_loop, daemon=True, name="PlaywrightEventLoop")
+            self.thread.start()
+            _log_thread_operation(self.logger, "Starting Playwright event loop thread", f"Thread ID: {self.thread.ident}")
+            time.sleep(0.5)
+    
+    def _run_event_loop(self):
+        """Run the event loop in a dedicated thread"""
+        thread_id = threading.current_thread().ident
+        _log_thread_operation(self.logger, "Event loop thread started", f"Thread ID: {thread_id}")
+        
+        self._health.thread_id = thread_id
+        
+        try:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            _log_thread_operation(self.logger, "Event loop created", f"Loop ID: {id(self.loop)}")
+            
+            self.loop.run_until_complete(self._process_requests())
+        except Exception as e:
+            self.logger.error(f"{_get_thread_info()} Event loop thread error: {e}", exc_info=True)
+            _threading_metrics.record_event_loop_failure()
+        finally:
+            _log_thread_operation(self.logger, "Event loop shutting down")
+            if self._heartbeat_task and not self._heartbeat_task.done():
+                self._heartbeat_task.cancel()
+            
+            if self._pool:
+                try:
+                    self.loop.run_until_complete(self._pool.shutdown())
+                except Exception as e:
+                    self.logger.error(f"{_get_thread_info()} Error shutting down pool: {e}")
+            
+            if self._playwright:
+                try:
+                    self.loop.run_until_complete(self._playwright.stop())
+                except Exception as e:
+                    self.logger.error(f"{_get_thread_info()} Error stopping playwright: {e}")
+            
+            try:
+                self.loop.close()
+                _log_thread_operation(self.logger, "Event loop closed")
+            except Exception as e:
+                self.logger.error(f"{_get_thread_info()} Error closing loop: {e}")
+    
+    async def _heartbeat(self):
+        """Send periodic heartbeat to track event loop health"""
+        while not self._shutdown:
+            try:
+                self._health.update_heartbeat()
+                _log_thread_operation(self.logger, "Event loop heartbeat", f"Thread ID: {threading.current_thread().ident}")
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"{_get_thread_info()} Heartbeat error: {e}")
+                self._health.record_failure()
+                _threading_metrics.record_event_loop_failure()
+    
+    async def _process_requests(self):
+        """Process incoming analysis requests"""
+        _log_thread_operation(self.logger, "Starting request processing", f"Loop: {id(self.loop)}")
+        
+        self._heartbeat_task = asyncio.create_task(self._heartbeat())
+        
+        while not self._shutdown:
+            try:
+                request = self.request_queue.get(timeout=0.1)
+                
+                if request is None:
+                    _log_thread_operation(self.logger, "Received shutdown signal")
+                    break
+                
+                _log_thread_operation(self.logger, f"Processing analysis request", f"URL: {request.url}")
+                _threading_metrics.record_async_operation(threading.current_thread().ident)
+                
+                try:
+                    if self._pool is None:
+                        _log_thread_operation(self.logger, "Initializing Playwright pool")
+                        self._pool = PlaywrightPool(self.loop, self.logger)
+                        await self._pool.initialize()
+                    
+                    is_healthy, status = self._health.check_health()
+                    if not is_healthy:
+                        self.logger.warning(f"{_get_thread_info()} Event loop health check failed: {status}")
+                        _threading_metrics.record_event_loop_failure()
+                    
+                    result = await _run_analysis_once_async(
+                        request.url,
+                        request.timeout,
+                        request.force_retry,
+                        self._pool
+                    )
+                    request.future.set_result(result)
+                    _log_thread_operation(self.logger, "Analysis completed successfully", f"URL: {request.url}")
+                except Exception as e:
+                    error_type = type(e).__name__
+                    _log_thread_operation(self.logger, f"Analysis failed with {error_type}", f"URL: {request.url}, Error: {e}")
+                    
+                    if 'greenlet' in str(e).lower():
+                        _threading_metrics.record_greenlet_error()
+                        self.logger.error(f"{_get_thread_info()} Greenlet error detected: {e}", exc_info=True)
+                    
+                    request.future.set_exception(e)
+                    
+            except Empty:
+                continue
+            except Exception as e:
+                self.logger.error(f"{_get_thread_info()} Error processing request: {e}", exc_info=True)
+                _threading_metrics.record_event_loop_failure()
+        
+        _log_thread_operation(self.logger, "Request processing ended")
+    
+    def submit_analysis(self, url: str, timeout: int, force_retry: bool) -> Future:
+        """Submit an analysis request and return a Future"""
+        caller_thread_info = _get_thread_info()
+        _log_thread_operation(self.logger, f"Submitting analysis request from {caller_thread_info}", f"URL: {url}")
+        
+        future = Future()
+        request = AnalysisRequest(
+            url=url,
+            timeout=timeout,
+            force_retry=force_retry,
+            future=future
+        )
+        self.request_queue.put(request)
+        return future
+    
+    def get_health_status(self) -> Dict:
+        """Get event loop health status"""
+        return self._health.get_status()
+    
+    def check_and_recover(self) -> bool:
+        """
+        Check event loop health and attempt recovery if needed
+        
+        Returns:
+            True if healthy or recovery successful, False if recovery failed
+        """
+        is_healthy, status = self._health.check_health()
+        
+        if not is_healthy:
+            self.logger.error(f"{_get_thread_info()} Event loop unhealthy: {status}")
+            _threading_metrics.record_event_loop_failure()
+            
+            if not self.thread or not self.thread.is_alive():
+                self.logger.warning(f"{_get_thread_info()} Event loop thread is dead, attempting restart...")
+                try:
+                    self.start()
+                    time.sleep(1.0)
+                    
+                    if self.thread and self.thread.is_alive():
+                        self.logger.info(f"{_get_thread_info()} Event loop thread restarted successfully")
+                        return True
+                    else:
+                        self.logger.error(f"{_get_thread_info()} Failed to restart event loop thread")
+                        return False
+                except Exception as e:
+                    self.logger.error(f"{_get_thread_info()} Error restarting event loop thread: {e}", exc_info=True)
+                    return False
+            
+            return False
+        
+        return True
+    
+    def shutdown(self):
+        """Shutdown the event loop thread"""
+        _log_thread_operation(self.logger, "Initiating event loop shutdown")
+        self._shutdown = True
+        self.request_queue.put(None)
+        if self.thread:
+            self.thread.join(timeout=5.0)
+            _log_thread_operation(self.logger, "Event loop thread joined")
 
 
 class PlaywrightPool:
     MAX_MEMORY_MB = 1024
     POOL_SIZE = 3
     
-    def __init__(self):
+    def __init__(self, loop: asyncio.AbstractEventLoop, logger):
         self.instances = []
-        self.lock = threading.Lock()
-        self.logger = get_logger()
+        self.lock = asyncio.Lock()
+        self.logger = logger
         self._shutdown = False
-        self._playwright = None
+        self._playwright: Optional[Playwright] = None
         self._total_warm_starts = 0
         self._total_cold_starts = 0
         self._total_startup_time = 0.0
+        self.loop = loop
     
-    def _get_playwright(self):
+    async def initialize(self):
+        """Initialize the Playwright instance"""
+        _log_thread_operation(self.logger, "Initializing Playwright pool")
+        
         if not PLAYWRIGHT_AVAILABLE:
             raise PermanentError(
                 "Playwright is not installed. Install it with: pip install playwright && playwright install chromium"
             )
         
         if self._playwright is None:
-            self._playwright = sync_playwright().start()
-        return self._playwright
+            _log_thread_operation(self.logger, "Starting Playwright instance")
+            self._playwright = await async_playwright().start()
+            _log_thread_operation(self.logger, "Playwright instance started", f"Instance ID: {id(self._playwright)}")
     
-    def get_instance(self) -> Optional[PlaywrightInstance]:
-        with self.lock:
+    async def get_instance(self) -> Optional[PlaywrightInstance]:
+        _log_thread_operation(self.logger, "Getting Playwright instance from pool")
+        
+        async with self.lock:
             for instance in self.instances:
                 if instance.state == InstanceState.IDLE and instance.is_alive():
                     mem = instance.get_memory_usage()
@@ -461,33 +833,47 @@ class PlaywrightPool:
                         instance.state = InstanceState.BUSY
                         instance.last_used = time.time()
                         self._total_warm_starts += 1
+                        _log_thread_operation(self.logger, "Using warm instance", f"PID: {instance.pid}, Memory: {mem:.1f}MB")
                         return instance
                     else:
-                        self.logger.info(f"Killing instance due to high memory: {mem:.1f}MB")
-                        instance.kill()
+                        self.logger.info(f"{_get_thread_info()} Killing instance due to high memory: {mem:.1f}MB")
+                        await instance.kill()
                         self.instances.remove(instance)
+        
+        _log_thread_operation(self.logger, "No warm instances available")
         return None
     
-    def return_instance(self, instance: PlaywrightInstance, success: bool = True):
-        with self.lock:
+    async def return_instance(self, instance: PlaywrightInstance, success: bool = True):
+        _log_thread_operation(self.logger, "Returning instance to pool", f"Success: {success}, PID: {instance.pid}")
+        
+        async with self.lock:
             if not success:
                 instance.failures += 1
+                _log_thread_operation(self.logger, "Instance failure recorded", f"Total failures: {instance.failures}")
             
             mem = instance.get_memory_usage()
             if instance.failures >= 3 or mem >= self.MAX_MEMORY_MB or not instance.is_alive():
+                _log_thread_operation(self.logger, "Killing instance", f"Failures: {instance.failures}, Memory: {mem:.1f}MB, Alive: {instance.is_alive()}")
                 if instance in self.instances:
                     self.instances.remove(instance)
-                instance.kill()
+                await instance.kill()
                 return
             
             instance.state = InstanceState.IDLE
+            _log_thread_operation(self.logger, "Instance returned to pool", f"PID: {instance.pid}")
     
-    def create_instance(self) -> PlaywrightInstance:
+    async def create_instance(self) -> PlaywrightInstance:
         startup_start = time.time()
         logger = self.logger
+        thread_id = threading.current_thread().ident
+        
+        _log_thread_operation(logger, "Creating new Playwright instance")
         
         try:
-            pw = self._get_playwright()
+            if self._playwright is None:
+                await self.initialize()
+            
+            pw = self._playwright
             
             launch_args = [
                 '--disable-dev-shm-usage',
@@ -502,20 +888,26 @@ class PlaywrightPool:
             ]
             
             if DEBUG_MODE:
-                logger.debug("Creating Playwright instance with verbose logging enabled")
+                logger.debug(f"{_get_thread_info()} Creating Playwright instance with verbose logging enabled")
             
-            browser = pw.chromium.launch(
+            _log_thread_operation(logger, "Launching Chromium browser")
+            browser = await pw.chromium.launch(
                 headless=True,
                 args=launch_args
             )
+            _log_thread_operation(logger, "Chromium browser launched", f"Browser ID: {id(browser)}")
             
-            context = browser.new_context(
+            _log_thread_operation(logger, "Creating browser context")
+            _threading_metrics.record_context_creation(thread_id)
+            
+            context = await browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 java_script_enabled=True,
                 bypass_csp=True,
                 ignore_https_errors=True
             )
+            _log_thread_operation(logger, "Browser context created", f"Context ID: {id(context)}")
             
             browser_process = browser._impl_obj._connection._transport._proc if hasattr(browser, '_impl_obj') else None
             pid = browser_process.pid if browser_process else None
@@ -535,26 +927,29 @@ class PlaywrightPool:
                 startup_time=startup_time
             )
             
-            with self.lock:
+            async with self.lock:
                 if len(self.instances) < self.POOL_SIZE:
                     self.instances.append(instance)
                 self._total_cold_starts += 1
                 self._total_startup_time += startup_time
             
-            logger.info(f"Created new Playwright instance (PID: {pid}, startup time: {startup_time:.2f}s)")
+            logger.info(f"{_get_thread_info()} Created new Playwright instance (PID: {pid}, startup time: {startup_time:.2f}s)")
             return instance
         except Exception as e:
+            logger.error(f"{_get_thread_info()} Failed to create Playwright instance: {e}", exc_info=True)
+            if 'greenlet' in str(e).lower():
+                _threading_metrics.record_greenlet_error()
             raise PermanentError(f"Failed to create Playwright instance: {e}", original_exception=e)
     
-    def cleanup_dead_instances(self):
-        with self.lock:
+    async def cleanup_dead_instances(self):
+        async with self.lock:
             dead_instances = [i for i in self.instances if not i.is_alive() or i.state == InstanceState.DEAD]
             for instance in dead_instances:
-                instance.kill()
+                await instance.kill()
                 self.instances.remove(instance)
     
-    def get_pool_stats(self) -> Dict:
-        with self.lock:
+    async def get_pool_stats(self) -> Dict:
+        async with self.lock:
             return {
                 'total_instances': len(self.instances),
                 'idle_instances': sum(1 for i in self.instances if i.state == InstanceState.IDLE),
@@ -580,30 +975,31 @@ class PlaywrightPool:
                 ]
             }
     
-    def shutdown(self):
+    async def shutdown(self):
         self._shutdown = True
-        with self.lock:
+        async with self.lock:
             for instance in self.instances:
-                instance.kill()
+                await instance.kill()
             self.instances.clear()
             if self._playwright:
                 try:
-                    self._playwright.stop()
+                    await self._playwright.stop()
                 except Exception:
                     pass
                 self._playwright = None
 
 
-_pool = None
-_pool_lock = threading.Lock()
+_event_loop_thread = None
+_event_loop_thread_lock = threading.Lock()
 
 
-def _get_pool() -> PlaywrightPool:
-    global _pool
-    with _pool_lock:
-        if _pool is None:
-            _pool = PlaywrightPool()
-        return _pool
+def _get_event_loop_thread() -> PlaywrightEventLoopThread:
+    global _event_loop_thread
+    with _event_loop_thread_lock:
+        if _event_loop_thread is None:
+            _event_loop_thread = PlaywrightEventLoopThread()
+            _event_loop_thread.start()
+        return _event_loop_thread
 
 
 _circuit_breaker = None
@@ -662,7 +1058,7 @@ def _get_progressive_timeout() -> ProgressiveTimeout:
         return _progressive_timeout
 
 
-def _setup_request_interception(page: Page, instance: PlaywrightInstance) -> None:
+async def _setup_request_interception(page: Page, instance: PlaywrightInstance) -> None:
     """
     Set up request interception to block unnecessary resources.
     
@@ -670,7 +1066,8 @@ def _setup_request_interception(page: Page, instance: PlaywrightInstance) -> Non
         page: Playwright page object
         instance: PlaywrightInstance to track blocking stats
     """
-    def handle_route(route: Route, request: Request):
+    async def handle_route(route: Route):
+        request = route.request
         url = request.url
         resource_type = request.resource_type
         
@@ -679,12 +1076,12 @@ def _setup_request_interception(page: Page, instance: PlaywrightInstance) -> Non
         if should_block_resource(url, resource_type):
             is_pattern_block = any(pattern in url.lower() for pattern in BLOCKED_URL_PATTERNS)
             instance.blocking_stats.record_blocked(resource_type, is_pattern_block)
-            route.abort()
+            await route.abort()
         else:
-            route.continue_()
+            await route.continue_()
     
     if instance.request_blocking_enabled:
-        page.route('**/*', handle_route)
+        await page.route('**/*', handle_route)
 
 
 def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_retry: bool = False) -> Dict[str, Optional[int | str]]:
@@ -709,6 +1106,9 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
         PlaywrightAnalysisTimeoutError: If overall analysis exceeds timeout (not retryable)
         PermanentError: If there's a permanent error (e.g., Playwright not installed)
     """
+    logger = get_logger()
+    _log_thread_operation(logger, f"run_analysis called for {url}")
+    
     if not PLAYWRIGHT_AVAILABLE:
         raise PermanentError(
             "Playwright is not installed. Install it with: pip install playwright && playwright install chromium"
@@ -716,7 +1116,6 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
     
     metrics = get_global_metrics()
     metrics.increment_total_operations()
-    logger = get_logger()
     cache_manager = get_cache_manager(enabled=not skip_cache)
     
     from tools.metrics.metrics_collector import get_metrics_collector
@@ -758,7 +1157,22 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
             raise PlaywrightAnalysisTimeoutError(f"Analysis exceeded overall timeout of {timeout}s")
         
         try:
-            result = _run_analysis_once(url, timeout, force_retry=force_retry)
+            event_loop_thread = _get_event_loop_thread()
+            
+            if not event_loop_thread.check_and_recover():
+                logger.warning(f"{_get_thread_info()} Event loop health check failed for {url}, retrying...")
+                was_retried = True
+                time.sleep(current_backoff)
+                current_backoff = min(current_backoff * 2, max_backoff)
+                continue
+            
+            _log_thread_operation(logger, f"Submitting analysis to event loop thread", f"URL: {url}, Attempt: {attempt}")
+            
+            future = event_loop_thread.submit_analysis(url, timeout, force_retry)
+            result = future.result(timeout=timeout)
+            
+            _log_thread_operation(logger, f"Analysis completed successfully", f"URL: {url}")
+            
             metrics.record_success('run_analysis', was_retried=was_retried)
             metrics_collector.record_api_call_cypress()
             progressive_timeout.record_success()
@@ -813,6 +1227,31 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
             progressive_timeout.record_failure()
             
             is_retryable = not isinstance(e, PermanentError)
+            error_str = str(e).lower()
+            
+            if 'greenlet' in error_str or 'gr_frame' in error_str:
+                _threading_metrics.record_greenlet_error()
+                logger.error(
+                    f"{_get_thread_info()} Greenlet error detected in run_analysis",
+                    extra={
+                        'url': url,
+                        'attempt': attempt,
+                        'error': str(e)
+                    },
+                    exc_info=True
+                )
+            
+            if 'thread' in error_str and 'conflict' in error_str:
+                _threading_metrics.record_thread_conflict()
+                logger.error(
+                    f"{_get_thread_info()} Thread conflict detected in run_analysis",
+                    extra={
+                        'url': url,
+                        'attempt': attempt,
+                        'error': str(e)
+                    },
+                    exc_info=True
+                )
             
             metrics.record_error(
                 error_type=type(e).__name__,
@@ -824,7 +1263,7 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
             )
             
             logger.warning(
-                f"Retryable error for {url}, retrying (attempt {attempt})",
+                f"{_get_thread_info()} Retryable error for {url}, retrying (attempt {attempt})",
                 extra={
                     'url': url,
                     'attempt': attempt,
@@ -844,7 +1283,7 @@ def _monitor_process_memory(instance: PlaywrightInstance, max_memory_mb: float =
     return memory_mb >= max_memory_mb
 
 
-def _reload_page_with_retry(page: Page, url: str, reload_tracker: PageReloadTracker, logger) -> bool:
+async def _reload_page_with_retry(page: Page, url: str, reload_tracker: PageReloadTracker, logger) -> bool:
     """
     Reload the page with retry logic.
     
@@ -864,15 +1303,15 @@ def _reload_page_with_retry(page: Page, url: str, reload_tracker: PageReloadTrac
     try:
         reload_tracker.record_reload()
         logger.info(f"Reloading page (attempt {reload_tracker.reload_count}/{reload_tracker.max_reloads})...")
-        page.reload(wait_until='domcontentloaded', timeout=30000)
-        time.sleep(2)
+        await page.reload(wait_until='domcontentloaded', timeout=30000)
+        await asyncio.sleep(2)
         return True
     except Exception as e:
         logger.error(f"Page reload failed: {e}")
         return False
 
 
-def _click_analyze_button(page: Page, url: str, reload_tracker: PageReloadTracker, timeout_ms: int = 10000) -> bool:
+async def _click_analyze_button(page: Page, url: str, reload_tracker: PageReloadTracker, timeout_ms: int = 10000) -> bool:
     """
     Click the Analyze button using multiple selector strategies with retry logic and page reload on failure.
     
@@ -912,7 +1351,7 @@ def _click_analyze_button(page: Page, url: str, reload_tracker: PageReloadTracke
                     logger.debug(f"Attempting to click analyze button with selector {i}/{len(selectors)}: {selector}")
                 
                 button = page.locator(selector).first
-                button.click(timeout=timeout_ms)
+                await button.click(timeout=timeout_ms)
                 logger.info(f"Successfully clicked analyze button using selector: {selector}")
                 return True
             except Exception as e:
@@ -926,11 +1365,11 @@ def _click_analyze_button(page: Page, url: str, reload_tracker: PageReloadTracke
             screenshot_path = None
             html_path = None
             if DEBUG_MODE or get_debug_mode():
-                screenshot_path = _save_debug_screenshot(page, url, "button_not_found")
-                html_path = _save_debug_html(page, url, "button_not_found")
+                screenshot_path = await _save_debug_screenshot(page, url, "button_not_found")
+                html_path = await _save_debug_html(page, url, "button_not_found")
             
-            if not _reload_page_with_retry(page, url, reload_tracker, logger):
-                error_msg = _create_enhanced_error_message(
+            if not await _reload_page_with_retry(page, url, reload_tracker, logger):
+                error_msg = await _create_enhanced_error_message(
                     f"Failed to click analyze button after {max_attempts} attempts - all selectors failed",
                     url,
                     page=page,
@@ -943,10 +1382,10 @@ def _click_analyze_button(page: Page, url: str, reload_tracker: PageReloadTracke
     screenshot_path = None
     html_path = None
     if DEBUG_MODE or get_debug_mode():
-        screenshot_path = _save_debug_screenshot(page, url, "button_not_found_final")
-        html_path = _save_debug_html(page, url, "button_not_found_final")
+        screenshot_path = await _save_debug_screenshot(page, url, "button_not_found_final")
+        html_path = await _save_debug_html(page, url, "button_not_found_final")
     
-    error_msg = _create_enhanced_error_message(
+    error_msg = await _create_enhanced_error_message(
         f"Failed to click analyze button after {max_attempts} attempts - all selectors failed",
         url,
         page=page,
@@ -957,7 +1396,7 @@ def _click_analyze_button(page: Page, url: str, reload_tracker: PageReloadTracke
     raise PlaywrightSelectorTimeoutError(error_msg)
 
 
-def _wait_for_device_buttons(page: Page, url: str, reload_tracker: PageReloadTracker, timeout_seconds: int = 30) -> bool:
+async def _wait_for_device_buttons(page: Page, url: str, reload_tracker: PageReloadTracker, timeout_seconds: int = 30) -> bool:
     """
     Poll for mobile and desktop buttons to appear on PageSpeed Insights page.
     Uses multiple selector strategies to maximize detection success.
@@ -986,20 +1425,20 @@ def _wait_for_device_buttons(page: Page, url: str, reload_tracker: PageReloadTra
         for selector in button_selectors:
             try:
                 button = page.locator(selector).first
-                if button.is_visible(timeout=500):
+                if await button.is_visible(timeout=500):
                     if DEBUG_MODE:
                         logger.debug(f"Found device button using selector: {selector}")
                     return True
             except Exception:
                 continue
         
-        time.sleep(poll_interval)
+        await asyncio.sleep(poll_interval)
     
     logger.warning(f"Device buttons not found within {timeout_seconds}s timeout")
     
     if DEBUG_MODE or get_debug_mode():
-        screenshot_path = _save_debug_screenshot(page, url, "device_buttons_timeout")
-        html_path = _save_debug_html(page, url, "device_buttons_timeout")
+        screenshot_path = await _save_debug_screenshot(page, url, "device_buttons_timeout")
+        html_path = await _save_debug_html(page, url, "device_buttons_timeout")
         if screenshot_path:
             logger.info(f"Debug screenshot saved: {screenshot_path}")
         if html_path:
@@ -1008,7 +1447,7 @@ def _wait_for_device_buttons(page: Page, url: str, reload_tracker: PageReloadTra
     return False
 
 
-def _wait_for_analysis_completion(page: Page, url: str, reload_tracker: PageReloadTracker, timeout_seconds: int = 180) -> bool:
+async def _wait_for_analysis_completion(page: Page, url: str, reload_tracker: PageReloadTracker, timeout_seconds: int = 180) -> bool:
     """
     Smart polling to wait for PageSpeed Insights analysis to complete.
     Waits for mobile/desktop buttons to appear before proceeding.
@@ -1028,9 +1467,9 @@ def _wait_for_analysis_completion(page: Page, url: str, reload_tracker: PageRelo
     
     while time.time() - start_time < timeout_seconds:
         try:
-            score_elements = page.locator('.lh-exp-gauge__percentage').all()
+            score_elements = await page.locator('.lh-exp-gauge__percentage').all()
             if not score_elements:
-                score_elements = page.locator('[data-testid="score-gauge"]').all()
+                score_elements = await page.locator('[data-testid="score-gauge"]').all()
             
             if len(score_elements) >= 1:
                 if DEBUG_MODE:
@@ -1040,8 +1479,8 @@ def _wait_for_analysis_completion(page: Page, url: str, reload_tracker: PageRelo
                     mobile_button = page.locator('button:has-text("Mobile"), [role="tab"]:has-text("Mobile")').first
                     desktop_button = page.locator('button:has-text("Desktop"), [role="tab"]:has-text("Desktop")').first
                     
-                    mobile_visible = mobile_button.is_visible(timeout=1000)
-                    desktop_visible = desktop_button.is_visible(timeout=1000)
+                    mobile_visible = await mobile_button.is_visible(timeout=1000)
+                    desktop_visible = await desktop_button.is_visible(timeout=1000)
                     
                     if mobile_visible or desktop_visible:
                         if DEBUG_MODE:
@@ -1058,13 +1497,13 @@ def _wait_for_analysis_completion(page: Page, url: str, reload_tracker: PageRelo
             if DEBUG_MODE:
                 logger.debug(f"Polling error: {e}")
         
-        time.sleep(poll_interval)
+        await asyncio.sleep(poll_interval)
     
     logger.warning(f"Analysis completion timeout after {timeout_seconds}s")
     
     if DEBUG_MODE or get_debug_mode():
-        screenshot_path = _save_debug_screenshot(page, url, "analysis_timeout")
-        html_path = _save_debug_html(page, url, "analysis_timeout")
+        screenshot_path = await _save_debug_screenshot(page, url, "analysis_timeout")
+        html_path = await _save_debug_html(page, url, "analysis_timeout")
         if screenshot_path:
             logger.info(f"Debug screenshot saved: {screenshot_path}")
         if html_path:
@@ -1073,7 +1512,7 @@ def _wait_for_analysis_completion(page: Page, url: str, reload_tracker: PageRelo
     return False
 
 
-def _extract_score_from_element(page: Page, view_type: str, url: str, max_retries: int = 5, retry_delay: float = 1.0) -> Optional[int]:
+async def _extract_score_from_element(page: Page, view_type: str, url: str, max_retries: int = 5, retry_delay: float = 1.0) -> Optional[int]:
     """
     Extract score from PageSpeed Insights page for given view type with enhanced reliability.
     
@@ -1112,11 +1551,12 @@ def _extract_score_from_element(page: Page, view_type: str, url: str, max_retrie
     for attempt in range(max_retries):
         for selector in all_selectors:
             try:
-                elements = page.locator(selector).all()
+                elements = await page.locator(selector).all()
                 if not elements:
                     continue
                 
-                score_text = elements[0].inner_text().strip()
+                score_text = await elements[0].inner_text()
+                score_text = score_text.strip()
                 
                 if not score_text or score_text == '':
                     if DEBUG_MODE:
@@ -1148,13 +1588,13 @@ def _extract_score_from_element(page: Page, view_type: str, url: str, max_retrie
         if attempt < max_retries - 1:
             if DEBUG_MODE:
                 logger.debug(f"No valid score found in attempt {attempt + 1}/{max_retries}, retrying after {retry_delay}s delay...")
-            time.sleep(retry_delay)
+            await asyncio.sleep(retry_delay)
     
     logger.warning(f"Failed to extract {view_type} score after {max_retries} attempts with all selectors")
     
     if DEBUG_MODE or get_debug_mode():
-        screenshot_path = _save_debug_screenshot(page, url, f"score_extraction_failed_{view_type}")
-        html_path = _save_debug_html(page, url, f"score_extraction_failed_{view_type}")
+        screenshot_path = await _save_debug_screenshot(page, url, f"score_extraction_failed_{view_type}")
+        html_path = await _save_debug_html(page, url, f"score_extraction_failed_{view_type}")
         if screenshot_path:
             logger.info(f"Debug screenshot saved: {screenshot_path}")
         if html_path:
@@ -1174,31 +1614,35 @@ def _get_psi_report_url(page: Page) -> Optional[str]:
     return None
 
 
-def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dict[str, Optional[int | str]]:
+async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, pool: PlaywrightPool) -> Dict[str, Optional[int | str]]:
     """
-    Internal function to run a single Playwright analysis attempt with circuit breaker protection,
+    Internal async function to run a single Playwright analysis attempt with circuit breaker protection,
     result caching, memory monitoring, resource blocking optimizations, and comprehensive error handling.
     """
     circuit_breaker = _get_circuit_breaker()
     logger = get_logger()
-    pool = _get_pool()
+    thread_id = threading.current_thread().ident
+    
+    _log_thread_operation(logger, f"Starting analysis for {url}")
     
     from tools.metrics.metrics_collector import get_metrics_collector
     metrics_collector = get_metrics_collector()
     
-    def _execute_playwright():
-        instance = pool.get_instance()
+    async def _execute_playwright():
+        _log_thread_operation(logger, "Executing Playwright analysis", f"URL: {url}")
+        
+        instance = await pool.get_instance()
         warm_start = instance is not None and instance.warm_start
         
         analysis_start_time = time.time()
         last_successful_step = None
         
         if warm_start:
-            logger.debug(f"Using warm Playwright instance for {url}")
+            logger.debug(f"{_get_thread_info()} Using warm Playwright instance for {url}")
         else:
-            logger.debug(f"Cold start Playwright instance for {url}")
+            logger.debug(f"{_get_thread_info()} Cold start Playwright instance for {url}")
             if instance is None:
-                instance = pool.create_instance()
+                instance = await pool.create_instance()
         
         page = None
         page_load_start = None
@@ -1206,9 +1650,13 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
         
         try:
             context = instance.context
-            page = context.new_page()
+            _log_thread_operation(logger, "Creating new page", f"Context ID: {id(context)}")
+            _threading_metrics.record_page_creation(thread_id)
             
-            _setup_request_interception(page, instance)
+            page = await context.new_page()
+            _log_thread_operation(logger, "Page created", f"Page ID: {id(page)}")
+            
+            await _setup_request_interception(page, instance)
             
             page.set_default_timeout(timeout * 1000)
             
@@ -1218,7 +1666,7 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
                 logger.debug(f"Navigating to PageSpeed Insights...")
             
             nav_start = time.time()
-            page.goto('https://pagespeed.web.dev/', wait_until='domcontentloaded', timeout=30000)
+            await page.goto('https://pagespeed.web.dev/', wait_until='domcontentloaded', timeout=30000)
             nav_time = time.time() - nav_start
             last_successful_step = "Navigated to PageSpeed Insights"
             
@@ -1228,17 +1676,17 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
             
             try:
                 url_input = page.locator('input[type="url"], input[name="url"], input[placeholder*="URL"]').first
-                url_input.fill(url)
+                await url_input.fill(url)
                 last_successful_step = "Entered URL in input field"
             except Exception as e:
                 screenshot_path = None
                 html_path = None
                 if DEBUG_MODE or get_debug_mode():
-                    screenshot_path = _save_debug_screenshot(page, url, "input_not_found")
-                    html_path = _save_debug_html(page, url, "input_not_found")
+                    screenshot_path = await _save_debug_screenshot(page, url, "input_not_found")
+                    html_path = await _save_debug_html(page, url, "input_not_found")
                 
-                pool.return_instance(instance, success=False)
-                error_msg = _create_enhanced_error_message(
+                await pool.return_instance(instance, success=False)
+                error_msg = await _create_enhanced_error_message(
                     f"Failed to find URL input field: {e}",
                     url,
                     page=page,
@@ -1248,15 +1696,15 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
                 )
                 raise PlaywrightSelectorTimeoutError(error_msg)
             
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)
             
             if DEBUG_MODE:
                 logger.debug("Clicking analyze button...")
             
             page_load_start = time.time()
-            button_clicked = _click_analyze_button(page, url, reload_tracker, timeout_ms=10000)
+            button_clicked = await _click_analyze_button(page, url, reload_tracker, timeout_ms=10000)
             if not button_clicked:
-                pool.return_instance(instance, success=False)
+                await pool.return_instance(instance, success=False)
                 raise PlaywrightSelectorTimeoutError("Failed to click analyze button - all selectors failed")
             
             last_successful_step = "Clicked analyze button"
@@ -1264,7 +1712,7 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
             if DEBUG_MODE:
                 logger.debug("Waiting for analysis to complete...")
             
-            analysis_completed = _wait_for_analysis_completion(page, url, reload_tracker, timeout_seconds=min(180, timeout))
+            analysis_completed = await _wait_for_analysis_completion(page, url, reload_tracker, timeout_seconds=min(180, timeout))
             
             if not analysis_completed:
                 elapsed = time.time() - analysis_start_time
@@ -1272,11 +1720,11 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
                     screenshot_path = None
                     html_path = None
                     if DEBUG_MODE or get_debug_mode():
-                        screenshot_path = _save_debug_screenshot(page, url, "analysis_timeout")
-                        html_path = _save_debug_html(page, url, "analysis_timeout")
+                        screenshot_path = await _save_debug_screenshot(page, url, "analysis_timeout")
+                        html_path = await _save_debug_html(page, url, "analysis_timeout")
                     
-                    pool.return_instance(instance, success=False)
-                    error_msg = _create_enhanced_error_message(
+                    await pool.return_instance(instance, success=False)
+                    error_msg = await _create_enhanced_error_message(
                         f"Analysis exceeded {timeout} seconds timeout",
                         url,
                         page=page,
@@ -1289,11 +1737,11 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
                 screenshot_path = None
                 html_path = None
                 if DEBUG_MODE or get_debug_mode():
-                    screenshot_path = _save_debug_screenshot(page, url, "completion_timeout")
-                    html_path = _save_debug_html(page, url, "completion_timeout")
+                    screenshot_path = await _save_debug_screenshot(page, url, "completion_timeout")
+                    html_path = await _save_debug_html(page, url, "completion_timeout")
                 
-                pool.return_instance(instance, success=False)
-                error_msg = _create_enhanced_error_message(
+                await pool.return_instance(instance, success=False)
+                error_msg = await _create_enhanced_error_message(
                     "Analysis did not complete - score elements not found",
                     url,
                     page=page,
@@ -1308,25 +1756,25 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
             
             if _monitor_process_memory(instance, max_memory_mb=PlaywrightPool.MAX_MEMORY_MB):
                 logger.warning(f"Playwright process exceeded memory limit ({PlaywrightPool.MAX_MEMORY_MB}MB)")
-                pool.return_instance(instance, success=False)
+                await pool.return_instance(instance, success=False)
                 raise PlaywrightRunnerError("Playwright process exceeded memory limit")
             
             if DEBUG_MODE:
                 logger.debug("Waiting for device buttons to be available...")
             
-            buttons_found = _wait_for_device_buttons(page, url, reload_tracker, timeout_seconds=30)
+            buttons_found = await _wait_for_device_buttons(page, url, reload_tracker, timeout_seconds=30)
             
             if not buttons_found:
                 logger.warning("Device buttons not found within 30s, attempting score extraction anyway...")
             else:
                 last_successful_step = "Device buttons loaded"
             
-            time.sleep(2)
+            await asyncio.sleep(2)
             
             if DEBUG_MODE:
                 logger.debug("Extracting mobile score...")
             
-            mobile_score = _extract_score_from_element(page, 'mobile', url)
+            mobile_score = await _extract_score_from_element(page, 'mobile', url)
             if mobile_score is not None:
                 last_successful_step = f"Extracted mobile score: {mobile_score}"
             
@@ -1347,7 +1795,7 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
             for selector in desktop_button_selectors:
                 try:
                     desktop_button = page.locator(selector).first
-                    desktop_button.click(timeout=5000)
+                    await desktop_button.click(timeout=5000)
                     desktop_switched = True
                     if DEBUG_MODE:
                         logger.debug(f"Successfully switched to desktop view using selector: {selector}")
@@ -1359,11 +1807,11 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
                     continue
             
             if desktop_switched:
-                time.sleep(2)
+                await asyncio.sleep(2)
                 if DEBUG_MODE:
                     logger.debug("Extracting desktop score...")
                 
-                desktop_score = _extract_score_from_element(page, 'desktop', url)
+                desktop_score = await _extract_score_from_element(page, 'desktop', url)
                 if desktop_score is not None:
                     last_successful_step = f"Extracted desktop score: {desktop_score}"
                 
@@ -1372,11 +1820,11 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
                 screenshot_path = None
                 html_path = None
                 if DEBUG_MODE or get_debug_mode():
-                    screenshot_path = _save_debug_screenshot(page, url, "desktop_switch_failed")
-                    html_path = _save_debug_html(page, url, "desktop_switch_failed")
+                    screenshot_path = await _save_debug_screenshot(page, url, "desktop_switch_failed")
+                    html_path = await _save_debug_html(page, url, "desktop_switch_failed")
                 
-                pool.return_instance(instance, success=False)
-                error_msg = _create_enhanced_error_message(
+                await pool.return_instance(instance, success=False)
+                error_msg = await _create_enhanced_error_message(
                     "Failed to switch to desktop view with all selectors",
                     url,
                     page=page,
@@ -1390,11 +1838,11 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
                 screenshot_path = None
                 html_path = None
                 if DEBUG_MODE or get_debug_mode():
-                    screenshot_path = _save_debug_screenshot(page, url, "no_scores_extracted")
-                    html_path = _save_debug_html(page, url, "no_scores_extracted")
+                    screenshot_path = await _save_debug_screenshot(page, url, "no_scores_extracted")
+                    html_path = await _save_debug_html(page, url, "no_scores_extracted")
                 
-                pool.return_instance(instance, success=False)
-                error_msg = _create_enhanced_error_message(
+                await pool.return_instance(instance, success=False)
+                error_msg = await _create_enhanced_error_message(
                     "Failed to extract any scores from PageSpeed Insights",
                     url,
                     page=page,
@@ -1416,8 +1864,8 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
                 total_requests=instance.blocking_stats.total_requests
             )
             
-            page.close()
-            pool.return_instance(instance, success=True)
+            await page.close()
+            await pool.return_instance(instance, success=True)
             
             return {
                 'mobile_score': mobile_score,
@@ -1435,10 +1883,10 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
         except (PlaywrightAnalysisTimeoutError, PlaywrightSelectorTimeoutError):
             if page:
                 try:
-                    page.close()
+                    await page.close()
                 except Exception:
                     pass
-            pool.return_instance(instance, success=False)
+            await pool.return_instance(instance, success=False)
             raise
             
         except Exception as e:
@@ -1446,20 +1894,20 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
             html_path = None
             if page:
                 if DEBUG_MODE or get_debug_mode():
-                    screenshot_path = _save_debug_screenshot(page, url, "unexpected_error")
-                    html_path = _save_debug_html(page, url, "unexpected_error")
+                    screenshot_path = await _save_debug_screenshot(page, url, "unexpected_error")
+                    html_path = await _save_debug_html(page, url, "unexpected_error")
                 
                 try:
-                    page.close()
+                    await page.close()
                 except Exception:
                     pass
             
-            pool.return_instance(instance, success=False)
+            await pool.return_instance(instance, success=False)
             
             if isinstance(e, (PlaywrightRunnerError, PermanentError)):
                 raise
             
-            error_msg = _create_enhanced_error_message(
+            error_msg = await _create_enhanced_error_message(
                 f"Playwright execution failed: {e}",
                 url,
                 page=page,
@@ -1473,15 +1921,15 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
         if DEBUG_MODE:
             logger.debug(f"Force retry enabled - bypassing circuit breaker for {url}")
         try:
-            return _execute_playwright()
+            return await _execute_playwright()
         except Exception as e:
             if "Circuit breaker" in str(e) and "is OPEN" in str(e):
                 logger.warning(f"Circuit breaker bypassed due to --force-retry flag")
-                return _execute_playwright()
+                return await _execute_playwright()
             raise
     else:
         try:
-            return circuit_breaker.call(_execute_playwright)
+            return circuit_breaker.call(lambda: asyncio.run_coroutine_threadsafe(_execute_playwright(), pool.loop).result())
         except Exception as e:
             if "Circuit breaker" in str(e) and "is OPEN" in str(e):
                 logger.error(
@@ -1498,11 +1946,174 @@ def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dic
 
 def shutdown_pool():
     """Shutdown the Playwright pool (call on application exit)"""
-    pool = _get_pool()
-    pool.shutdown()
+    event_loop_thread = _get_event_loop_thread()
+    event_loop_thread.shutdown()
 
 
 def get_pool_stats() -> Dict:
     """Get current pool statistics for monitoring"""
-    pool = _get_pool()
-    return pool.get_pool_stats()
+    event_loop_thread = _get_event_loop_thread()
+    if event_loop_thread.loop and event_loop_thread._pool:
+        future = asyncio.run_coroutine_threadsafe(
+            event_loop_thread._pool.get_pool_stats(),
+            event_loop_thread.loop
+        )
+        return future.result(timeout=5.0)
+    return {
+        'total_instances': 0,
+        'idle_instances': 0,
+        'busy_instances': 0,
+        'total_warm_starts': 0,
+        'total_cold_starts': 0,
+        'avg_startup_time': 0.0,
+        'instances': []
+    }
+
+
+def get_event_loop_health() -> Dict:
+    """Get event loop health status"""
+    event_loop_thread = _get_event_loop_thread()
+    return event_loop_thread.get_health_status()
+
+
+def diagnose_threading_issues() -> Dict:
+    """
+    Comprehensive diagnostic report for threading issues
+    
+    Returns a dictionary with:
+    - Threading metrics (greenlet errors, thread conflicts, etc.)
+    - Event loop health status
+    - Pool statistics
+    - Active thread information
+    - Python/asyncio version info
+    """
+    logger = get_logger()
+    
+    main_thread = threading.main_thread()
+    current_thread = threading.current_thread()
+    all_threads = threading.enumerate()
+    
+    event_loop_thread = _get_event_loop_thread()
+    
+    try:
+        loop_info = None
+        if event_loop_thread.loop:
+            try:
+                loop_info = {
+                    'loop_id': id(event_loop_thread.loop),
+                    'is_running': event_loop_thread.loop.is_running(),
+                    'is_closed': event_loop_thread.loop.is_closed(),
+                }
+            except Exception as e:
+                loop_info = {'error': str(e)}
+    except Exception as e:
+        loop_info = {'error': str(e)}
+    
+    try:
+        asyncio_debug = asyncio.get_event_loop().get_debug()
+    except Exception:
+        asyncio_debug = None
+    
+    diagnosis = {
+        'python_version': sys.version,
+        'asyncio_debug': asyncio_debug,
+        'main_thread': {
+            'id': main_thread.ident,
+            'name': main_thread.name,
+            'is_alive': main_thread.is_alive()
+        },
+        'current_thread': {
+            'id': current_thread.ident,
+            'name': current_thread.name,
+            'is_alive': current_thread.is_alive(),
+            'is_main': current_thread == main_thread
+        },
+        'all_threads': [
+            {
+                'id': t.ident,
+                'name': t.name,
+                'daemon': t.daemon,
+                'is_alive': t.is_alive()
+            }
+            for t in all_threads
+        ],
+        'event_loop_thread': {
+            'exists': event_loop_thread is not None,
+            'thread_id': event_loop_thread.thread.ident if event_loop_thread.thread else None,
+            'thread_name': event_loop_thread.thread.name if event_loop_thread.thread else None,
+            'thread_is_alive': event_loop_thread.thread.is_alive() if event_loop_thread.thread else False,
+            'loop_info': loop_info
+        },
+        'threading_metrics': get_threading_metrics(),
+        'event_loop_health': get_event_loop_health(),
+        'pool_stats': get_pool_stats(),
+    }
+    
+    logger.info(f"{_get_thread_info()} Threading diagnostics generated")
+    
+    return diagnosis
+
+
+def print_threading_diagnostics():
+    """Print a formatted threading diagnostics report to stdout"""
+    import json
+    
+    diagnosis = diagnose_threading_issues()
+    
+    print("\n" + "="*80)
+    print("PLAYWRIGHT THREADING DIAGNOSTICS")
+    print("="*80)
+    
+    print(f"\nPython Version: {diagnosis['python_version']}")
+    print(f"Asyncio Debug: {diagnosis.get('asyncio_debug', 'N/A')}")
+    
+    print("\n--- Main Thread ---")
+    print(f"  ID: {diagnosis['main_thread']['id']}")
+    print(f"  Name: {diagnosis['main_thread']['name']}")
+    print(f"  Alive: {diagnosis['main_thread']['is_alive']}")
+    
+    print("\n--- Current Thread ---")
+    print(f"  ID: {diagnosis['current_thread']['id']}")
+    print(f"  Name: {diagnosis['current_thread']['name']}")
+    print(f"  Is Main: {diagnosis['current_thread']['is_main']}")
+    
+    print("\n--- All Threads ---")
+    for t in diagnosis['all_threads']:
+        print(f"  [{t['id']}] {t['name']} (daemon={t['daemon']}, alive={t['is_alive']})")
+    
+    print("\n--- Event Loop Thread ---")
+    elt = diagnosis['event_loop_thread']
+    print(f"  Exists: {elt['exists']}")
+    print(f"  Thread ID: {elt['thread_id']}")
+    print(f"  Thread Name: {elt['thread_name']}")
+    print(f"  Thread Alive: {elt['thread_is_alive']}")
+    if elt['loop_info']:
+        print(f"  Loop Info: {json.dumps(elt['loop_info'], indent=4)}")
+    
+    print("\n--- Threading Metrics ---")
+    metrics = diagnosis['threading_metrics']
+    print(f"  Greenlet Errors: {metrics['greenlet_errors']}")
+    print(f"  Thread Conflicts: {metrics['thread_conflicts']}")
+    print(f"  Event Loop Failures: {metrics['event_loop_failures']}")
+    print(f"  Context Creations by Thread: {metrics['context_creation_by_thread']}")
+    print(f"  Page Creations by Thread: {metrics['page_creation_by_thread']}")
+    print(f"  Async Operations by Thread: {metrics['async_operations_by_thread']}")
+    
+    print("\n--- Event Loop Health ---")
+    health = diagnosis['event_loop_health']
+    print(f"  Last Heartbeat: {health['last_heartbeat']}")
+    print(f"  Time Since Heartbeat: {health['time_since_heartbeat']}")
+    print(f"  Heartbeat Failures: {health['heartbeat_failures']}")
+    print(f"  Is Responsive: {health['is_responsive']}")
+    print(f"  Thread ID: {health['thread_id']}")
+    
+    print("\n--- Pool Stats ---")
+    pool = diagnosis['pool_stats']
+    print(f"  Total Instances: {pool['total_instances']}")
+    print(f"  Idle Instances: {pool['idle_instances']}")
+    print(f"  Busy Instances: {pool['busy_instances']}")
+    print(f"  Warm Starts: {pool['total_warm_starts']}")
+    print(f"  Cold Starts: {pool['total_cold_starts']}")
+    print(f"  Avg Startup Time: {pool['avg_startup_time']:.2f}s")
+    
+    print("\n" + "="*80 + "\n")

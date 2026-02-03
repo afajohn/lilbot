@@ -7,12 +7,18 @@ Automated tool for running PageSpeed Insights audits on URLs from Google Sheets 
 - **[QUICKSTART.md](QUICKSTART.md)** - Get started in 5 minutes
 - **[INSTALL.md](INSTALL.md)** - Detailed installation guide
 - **[README.md](README.md)** - Full documentation (this file)
-- **[AGENTS.md](AGENTS.md)** - Developer guide
+- **[AGENTS.md](AGENTS.md)** - Developer guide (includes threading architecture, async Playwright explanation, greenlet error troubleshooting)
 - **[CACHE_GUIDE.md](CACHE_GUIDE.md)** - Caching configuration and usage
 - **[PERFORMANCE_OPTIMIZATIONS.md](PERFORMANCE_OPTIMIZATIONS.md)** - Performance improvements and benchmarks
 - **[SECURITY.md](SECURITY.md)** - Security hardening features (detailed)
 - **[SECURITY_QUICK_REFERENCE.md](SECURITY_QUICK_REFERENCE.md)** - Security quick reference guide
 - **[VALIDATION.md](VALIDATION.md)** - Input validation and data quality guide
+
+**Key Topics in This File:**
+- [Skip Logic](#skip-logic) - When URLs are skipped vs re-analyzed
+- [Cell Value Examples](#cell-value-examples) - Expected spreadsheet cell values for all scenarios
+- [Threading Architecture](#threading-architecture) - Why async Playwright is used and how threading works
+- [Troubleshooting Greenlet Errors](#error-greenlet-error-cannot-switch-to-a-different-thread) - Complete guide to debugging threading issues
 
 ## Overview
 
@@ -391,6 +397,138 @@ PSI URLs for failing scores written to columns F (mobile) and G (desktop).
 
 Logs are saved in the `logs/` directory with timestamps for future reference.
 
+## Skip Logic
+
+The audit tool implements intelligent skip logic to avoid re-analyzing URLs that have already been successfully audited:
+
+**When URLs are Skipped:**
+
+A URL is **skipped** (not re-analyzed) when **BOTH** of the following conditions are true:
+1. Column F (Mobile) contains the text `"passed"` **OR** has a green background color (RGB: 0, 255, 0)
+2. Column G (Desktop) contains the text `"passed"` **OR** has a green background color (RGB: 0, 255, 0)
+
+**When URLs are Analyzed:**
+
+A URL is **analyzed** when **ANY** of the following conditions are true:
+- Column F is empty
+- Column G is empty
+- Column F contains a PSI URL (e.g., `https://pagespeed.web.dev/analysis?url=...`)
+- Column G contains a PSI URL
+- Column F contains any text other than `"passed"` without green background
+- Column G contains any text other than `"passed"` without green background
+- Only ONE of the columns has `"passed"` or green background (both must pass to skip)
+
+**Skip Logic Examples:**
+
+| Column F (Mobile) | Column G (Desktop) | Skip? | Reason |
+|-------------------|-------------------|-------|--------|
+| `passed` | `passed` | ✅ YES | Both columns contain "passed" |
+| `passed` (green bg) | `passed` (green bg) | ✅ YES | Both columns have green background |
+| `passed` | `passed` (green bg) | ✅ YES | F has text "passed", G has green background |
+| `passed` (green bg) | `passed` | ✅ YES | F has green background, G has text "passed" |
+| `passed` | `https://pagespeed.web.dev/...` | ❌ NO | Desktop has PSI URL (failed score) |
+| `https://pagespeed.web.dev/...` | `passed` | ❌ NO | Mobile has PSI URL (failed score) |
+| `passed` | (empty) | ❌ NO | Desktop column is empty |
+| (empty) | `passed` | ❌ NO | Mobile column is empty |
+| (empty) | (empty) | ❌ NO | Both columns are empty |
+| `https://pagespeed.web.dev/...` | `https://pagespeed.web.dev/...` | ❌ NO | Both have PSI URLs (failed scores) |
+| `Error` | `passed` | ❌ NO | Mobile has error text (not "passed") |
+| `passed` | `Error` | ❌ NO | Desktop has error text (not "passed") |
+
+**Testing Skip Logic:**
+
+```bash
+# Validate skip logic with all scenarios
+python validate_skip_logic.py
+
+# Generate test spreadsheet with skip logic examples
+python generate_test_spreadsheet_scenarios.py
+```
+
+## Cell Value Examples
+
+**Expected cell values for different scenarios:**
+
+| Scenario | Column F (Mobile) | Column G (Desktop) | Notes |
+|----------|-------------------|-------------------|-------|
+| **Success Cases** | | | |
+| Both scores pass (≥80) | `passed` | `passed` | Most common success state |
+| Both scores pass (green cells) | (green bg) | (green bg) | Alternative success indicator |
+| Mixed indicators | `passed` | (green bg) | Either indicator works per column |
+| **Failure Cases** | | | |
+| Mobile fails, Desktop passes | `https://pagespeed.web.dev/analysis?url=https://example.com` | `passed` | PSI URL for failed score |
+| Mobile passes, Desktop fails | `passed` | `https://pagespeed.web.dev/analysis?url=https://example.com` | PSI URL for failed score |
+| Both fail (scores <80) | `https://pagespeed.web.dev/analysis?url=https://example.com` | `https://pagespeed.web.dev/analysis?url=https://example.com` | Both get PSI URLs |
+| **Error Cases** | | | |
+| Analysis timeout | `Error: Timeout` | `Error: Timeout` | Both columns show error |
+| Browser error | `Error: Browser failed` | (empty) | Partial error state |
+| Network error | `Error: Network timeout` | `Error: Network timeout` | Both columns show error |
+| **Pending Cases** | | | |
+| Not yet analyzed | (empty) | (empty) | Will be analyzed on next run |
+| Previously failed, re-run | `https://pagespeed.web.dev/...` | `https://pagespeed.web.dev/...` | Will be re-analyzed |
+
+**Quick Reference - Will This URL Be Skipped?**
+
+Use this table to quickly determine if a URL will be skipped or analyzed:
+
+| Column F | Column G | Skip? | Explanation |
+|----------|----------|-------|-------------|
+| ✅ passed | ✅ passed | **YES** | Both passed - skip |
+| ✅ passed | 🟩 green | **YES** | Both passed - skip |
+| 🟩 green | 🟩 green | **YES** | Both passed - skip |
+| ✅ passed | ❌ PSI URL | **NO** | Desktop failed - analyze |
+| ❌ PSI URL | ✅ passed | **NO** | Mobile failed - analyze |
+| ✅ passed | ⬜ empty | **NO** | Desktop not done - analyze |
+| ⬜ empty | ✅ passed | **NO** | Mobile not done - analyze |
+| ⬜ empty | ⬜ empty | **NO** | Neither done - analyze |
+| ❌ PSI URL | ❌ PSI URL | **NO** | Both failed - analyze |
+| ⚠️ Error | ✅ passed | **NO** | Mobile error - analyze |
+| ✅ passed | ⚠️ Error | **NO** | Desktop error - analyze |
+
+**Legend**: ✅ = "passed" text, 🟩 = green background, ❌ = PSI URL, ⬜ = empty, ⚠️ = error message
+
+## Threading Architecture
+
+**Why Async Playwright?**
+
+Although `run_audit.py` uses a synchronous API, Playwright internally runs asynchronously because:
+
+1. **Browser Automation is Asynchronous**: Network requests, page loads, DOM queries, and interactions are I/O-bound operations that benefit from async execution
+2. **Performance**: Async enables concurrent operations (e.g., multiple browser contexts analyzing different URLs simultaneously)
+3. **Playwright Design**: The library is designed as async-first for optimal performance
+
+**Single Event Loop Thread Architecture:**
+
+The system uses a dedicated event loop thread to ensure thread safety:
+
+- **Main Thread**: Handles application logic, submits analysis requests, processes results
+- **Event Loop Thread**: Dedicated daemon thread running asyncio event loop for all Playwright operations
+- **Thread-Safe Communication**: Requests submitted via `asyncio.run_coroutine_threadsafe()` from main thread to event loop thread
+- **Synchronous Interface**: Main thread blocks on `Future` objects to get results from async operations
+
+**Threading Flow:**
+
+```
+Main Thread                          Event Loop Thread
+-----------                          -----------------
+1. Submit request                    (Event loop running)
+   run_analysis(url) -->             
+                                     2. Schedule async coroutine
+                                     3. Execute Playwright async:
+                                        - await page.goto()
+                                        - await page.click()
+5. Block on Future.result()          
+                                     4. Set Future result
+<-- Return results
+6. Process results
+```
+
+**Why This Prevents Greenlet Errors:**
+
+All Playwright operations (browser contexts, pages, async calls) execute on the same thread, preventing "greenlet.error: cannot switch to a different thread" errors that occur when async operations try to switch between threads.
+
+For detailed threading diagnostics, see the **Troubleshooting** section below.
+
 ## Troubleshooting
 
 ### Error: UnicodeDecodeError: 'charmap' codec can't decode byte
@@ -561,6 +699,80 @@ playwright codegen https://pagespeed.web.dev
 ```
 
 This opens an interactive browser where you can test selectors and generate code.
+
+### Error: greenlet.error: cannot switch to a different thread
+
+**What is a Greenlet Error?**
+
+Greenlet is a lightweight cooperative threading library used internally by Playwright's async implementation. This error occurs when Playwright tries to switch execution context between threads, which violates the single-thread requirement for asyncio event loops.
+
+**Cause**: Playwright operations are being executed from different threads instead of the dedicated event loop thread.
+
+**How the System Prevents This:**
+
+The system uses a dedicated event loop thread architecture where:
+1. All Playwright operations run on a single dedicated thread
+2. Main thread submits requests via `asyncio.run_coroutine_threadsafe()`
+3. All browser contexts and pages are created within the event loop thread
+
+**If You Encounter Greenlet Errors:**
+
+1. **Check Threading Diagnostics**:
+   ```bash
+   python diagnose_playwright_threading.py
+   ```
+   Look for:
+   - `greenlet_errors` count in metrics
+   - Multiple thread IDs in `context_creation_by_thread` or `page_creation_by_thread`
+   - Event loop health status showing unresponsive (>30s since last heartbeat)
+
+2. **Enable Debug Logging**:
+   ```bash
+   python run_audit.py --tab "TAB_NAME" --debug-mode
+   ```
+   This shows thread IDs for all Playwright operations. All should have the same thread ID (the event loop thread).
+
+3. **Common Fixes**:
+   - **Restart the application**: Event loop may be corrupted
+   - **Reduce concurrency**: Use `--concurrency 1` to eliminate threading complexity
+   - **Check event loop health**: Verify event loop thread is responsive
+   - **Review custom modifications**: Ensure you haven't added code that calls Playwright from wrong thread
+
+4. **Verify Single Thread Execution**:
+   - All Playwright operations should log the same thread ID
+   - Main thread should have a different thread ID
+   - Check diagnostics output for thread conflicts
+
+**Example Error:**
+```
+greenlet.error: cannot switch to a different thread
+
+Stack trace pattern:
+File "playwright/_impl/_browser_context.py", line X, in new_page
+File "greenlet/__init__.py", line Y, in switch
+greenlet.error: cannot switch to a different thread
+```
+
+**Prevention Best Practices:**
+- Never call Playwright operations directly from ThreadPoolExecutor
+- Always use the provided `run_analysis()` function which handles threading correctly
+- Don't modify Playwright code to use sync APIs
+- Keep all browser context and page creation within the event loop thread
+
+**Diagnostic Tools:**
+
+```bash
+# Full diagnostics with all metrics
+python diagnose_playwright_threading.py
+
+# Export diagnostics to JSON for analysis
+python diagnose_playwright_threading.py --json diagnostics.json
+
+# View only specific components
+python diagnose_playwright_threading.py --metrics-only
+python diagnose_playwright_threading.py --health-only
+python diagnose_playwright_threading.py --pool-only
+```
 
 ### Permission denied when writing to spreadsheet
 
