@@ -682,38 +682,78 @@ def _wait_for_analysis_completion(page: Page, timeout_seconds: int = 180) -> boo
     return False
 
 
-def _extract_score_from_element(page: Page, view_type: str) -> Optional[int]:
+def _extract_score_from_element(page: Page, view_type: str, max_retries: int = 5, retry_delay: float = 1.0) -> Optional[int]:
     """
-    Extract score from PageSpeed Insights page for given view type.
+    Extract score from PageSpeed Insights page for given view type with enhanced reliability.
+    
+    Implements retry logic with delays to handle cases where score elements exist but are not yet populated.
+    Validates that extracted scores are valid integers between 0-100.
+    Uses multiple fallback selectors including text content parsing from gauge elements.
     
     Args:
         page: Playwright page object
         view_type: 'mobile' or 'desktop'
+        max_retries: Maximum number of retry attempts (default: 5)
+        retry_delay: Delay in seconds between retries (default: 1.0)
         
     Returns:
-        Score as integer (0-100) or None if not found
+        Score as integer (0-100) or None if not found after all retries
     """
     logger = get_logger()
     
-    selectors = [
+    primary_selectors = [
         '.lh-exp-gauge__percentage',
-        '[data-testid="score-gauge"]',
-        '.lh-gauge__percentage',
-        '[class*="gauge"] [class*="percentage"]'
+        '.lh-gauge__percentage'
     ]
     
-    for selector in selectors:
-        try:
-            elements = page.locator(selector).all()
-            if elements:
-                score_text = elements[0].inner_text().strip()
-                score = int(score_text)
-                logger.debug(f"Extracted {view_type} score: {score} using selector {selector}")
-                return score
-        except Exception as e:
-            logger.debug(f"Failed to extract score with selector {selector}: {e}")
-            continue
+    fallback_selectors = [
+        '[data-testid="lh-gauge"]',
+        '[data-testid="score-gauge"]',
+        '.lh-gauge__wrapper .lh-gauge__percentage',
+        '.lh-exp-gauge__wrapper .lh-exp-gauge__percentage',
+        '[class*="gauge"][class*="percentage"]',
+        '[class*="score"][class*="value"]'
+    ]
     
+    all_selectors = primary_selectors + fallback_selectors
+    
+    for attempt in range(max_retries):
+        for selector in all_selectors:
+            try:
+                elements = page.locator(selector).all()
+                if not elements:
+                    continue
+                
+                score_text = elements[0].inner_text().strip()
+                
+                if not score_text or score_text == '':
+                    logger.debug(f"Selector {selector} found element but content is empty (attempt {attempt + 1}/{max_retries})")
+                    continue
+                
+                score_text = score_text.replace('%', '').strip()
+                
+                try:
+                    score = int(score_text)
+                except ValueError:
+                    logger.debug(f"Could not parse score text '{score_text}' as integer for selector {selector}")
+                    continue
+                
+                if score < 0 or score > 100:
+                    logger.warning(f"Invalid score {score} extracted for {view_type} (must be 0-100), selector: {selector}")
+                    continue
+                
+                logger.debug(f"Successfully extracted {view_type} score: {score} using selector {selector} (attempt {attempt + 1}/{max_retries})")
+                return score
+                
+            except Exception as e:
+                logger.debug(f"Failed to extract score with selector {selector} (attempt {attempt + 1}/{max_retries}): {e}")
+                continue
+        
+        if attempt < max_retries - 1:
+            logger.debug(f"No valid score found in attempt {attempt + 1}/{max_retries}, retrying after {retry_delay}s delay...")
+            time.sleep(retry_delay)
+    
+    logger.warning(f"Failed to extract {view_type} score after {max_retries} attempts with all selectors")
     return None
 
 
