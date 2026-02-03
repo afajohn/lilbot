@@ -16,22 +16,21 @@ Automated tool for running PageSpeed Insights audits on URLs from Google Sheets 
 
 ## Overview
 
-This tool reads URLs from a Google Spreadsheet, analyzes each URL using PageSpeed Insights (via Cypress automation), and writes PageSpeed report URLs back to the spreadsheet for URLs with scores below 80.
+This tool reads URLs from a Google Spreadsheet, analyzes each URL using PageSpeed Insights (via Playwright automation), and writes PageSpeed report URLs back to the spreadsheet for URLs with scores below 80.
 
 ### ⚡ Performance Optimizations (v2.0)
 
 **Processing Speed Improved by ~40%**:
 - Reduced default timeout from 900s to 600s
-- Optimized Cypress wait times (from 5-15s to 2s between actions)
-- Reduced retry attempts (Cypress: 5→2, Python: 10→3)
+- Optimized Playwright wait times (from 5-15s to 2s between actions)
+- Reduced retry attempts (Playwright: 5→2, Python: 10→3)
 - Incremental spreadsheet updates (see results immediately, not after all URLs complete)
 - Explicit headless mode execution
-
-**Critical Fix**: Running `npx cypress open` while the audit script is running will block execution. Always close Cypress UI before starting audits.
+- Instance pooling for browser context reuse
 
 **Key Features:**
 - ✅ Batch process URLs from Google Sheets
-- ✅ Automated PageSpeed Insights analysis via Cypress
+- ✅ Automated PageSpeed Insights analysis via Playwright
 - ✅ **Result caching with Redis/file backend (24-hour TTL)**
 - ✅ Real-time progress tracking with incremental spreadsheet updates
 - ✅ Automatic retry on transient failures
@@ -44,7 +43,6 @@ This tool reads URLs from a Google Spreadsheet, analyzes each URL using PageSpee
 ## Prerequisites
 
 - **Python 3.7+** - Download from [python.org](https://www.python.org/downloads/)
-- **Node.js 14+ and npm** - Download from [nodejs.org](https://nodejs.org/)
 - **Google Cloud service account** with Sheets API access
 
 ## Setup Instructions
@@ -62,16 +60,17 @@ This installs:
 - `google-auth-oauthlib` - OAuth2 support
 - `google-auth-httplib2` - HTTP transport for Google APIs
 - `google-api-python-client` - Google Sheets API client
+- `playwright` - Browser automation library
 
-### 2. Install Node.js Dependencies
+### 2. Install Playwright Browsers
 
-In the same terminal, run:
+After installing Python dependencies, install the Playwright browsers:
 
 ```bash
-npm install
+playwright install chromium
 ```
 
-This installs Cypress for browser automation and related dependencies.
+This downloads the Chromium browser required for automated PageSpeed Insights analysis.
 
 ### 3. Google Cloud Service Account Setup
 
@@ -256,19 +255,48 @@ The tool expects your spreadsheet to have the following structure:
 
 ## How It Works
 
-1. **Authentication**: Authenticates with Google Sheets using the service account credentials
-2. **Read URLs**: Reads all URLs from column A (starting at row 2, i.e., A2:A) of the specified tab
-3. **Analysis**: For each URL:
-   - Launches Cypress in headless mode to automate PageSpeed Insights
-   - Navigates to pagespeed.web.dev
-   - Analyzes the URL (both mobile and desktop results are available from single analysis)
-   - Switches between Mobile/Desktop views to extract performance scores (0-100)
-   - Captures report URLs for failing scores (< 80)
-4. **Write Results**: Immediately updates the spreadsheet after each URL:
-   - Mobile PSI URLs → Column F (only if score < 80, otherwise "passed")
-   - Desktop PSI URLs → Column G (only if score < 80, otherwise "passed")
-   - Updates are incremental (not batched), so progress is visible in real-time
-5. **Summary**: Displays audit summary with pass/fail statistics
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    1. AUTHENTICATION                         │
+│  Authenticate with Google Sheets using service account      │
+└────────────────────┬────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    2. READ URLS                              │
+│  Read all URLs from column A (starting at A2)               │
+└────────────────────┬────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    3. ANALYZE EACH URL                       │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │ a) Check cache for existing results                  │  │
+│  │ b) If cache miss: Launch Playwright browser          │  │
+│  │ c) Navigate to pagespeed.web.dev                     │  │
+│  │ d) Enter URL and start analysis                      │  │
+│  │ e) Extract Mobile score from .lh-exp-gauge__percentage│ │
+│  │ f) Switch to Desktop view                            │  │
+│  │ g) Extract Desktop score                             │  │
+│  │ h) Capture PSI URLs for scores < 80                  │  │
+│  │ i) Cache results for 24 hours                        │  │
+│  └──────────────────────────────────────────────────────┘  │
+└────────────────────┬────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    4. UPDATE SPREADSHEET                     │
+│  Immediately write results after each URL:                  │
+│  • Column F: Mobile PSI URL (if score < 80, else "passed") │
+│  • Column G: Desktop PSI URL (if score < 80, else "passed")│
+└────────────────────┬────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    5. SUMMARY                                │
+│  Display audit summary with pass/fail statistics            │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Output
 
@@ -362,7 +390,7 @@ Logs are saved in the `logs/` directory with timestamps for future reference.
 - Check tab name matches exactly (case-sensitive)
 - Ensure the spreadsheet is shared with the service account email with **Editor** permissions
 
-### Error: Timeout - Cypress execution exceeded X seconds
+### Error: Timeout - Playwright execution exceeded X seconds
 
 **Cause**: The website took too long to load or PageSpeed Insights analysis timed out.
 
@@ -371,53 +399,49 @@ Logs are saved in the `logs/` directory with timestamps for future reference.
 - Check if the URL is accessible and loads properly
 - Verify your internet connection is stable
 
-### Issue: URLs taking too long to process or no spreadsheet updates
+### Error: Playwright browser not found
 
-**Cause**: Running `npx cypress open` while `run_audit.py` is executing blocks the headless Cypress instance.
-
-**Solution**:
-- **Close the Cypress UI** (`npx cypress open`) before running `run_audit.py`
-- Only one Cypress instance can run at a time
-- The audit script runs Cypress in headless mode automatically
-- With optimizations, each URL should complete in ~5-10 minutes (down from 15+ minutes)
-
-### Error: npx or Cypress not found
-
-**Cause**: Node.js or Cypress is not installed.
+**Cause**: Playwright browsers are not installed.
 
 **Solution**:
 ```bash
-npm install
+playwright install chromium
 ```
 
-If still not working, try:
+If still not working, try reinstalling Playwright:
 ```bash
-npm install -g npm
-npm install
+pip uninstall playwright
+pip install playwright
+playwright install chromium
 ```
 
-### Error: No new results file found
-
-**Cause**: Cypress ran but didn't generate a results file.
-
-**Solution**:
-- Check if `cypress/results/` directory exists
-- Review Cypress logs for errors
-- Verify the URL is accessible
-- Try running manually: `npx cypress open` and check the test
-
-### Cypress test fails with "Cypress failed with exit code 1"
+### Error: Browser process failed to launch
 
 **Possible Causes**:
-- PageSpeed Insights website structure may have changed
-- Network connectivity issues
-- The URL is not accessible or returns an error
+- Missing system dependencies for browser
+- Insufficient permissions
+- Corrupted browser installation
+
+**Solution (Linux)**:
+```bash
+# Install system dependencies
+playwright install-deps chromium
+```
+
+**Solution (Windows/Mac)**:
+```bash
+# Reinstall browsers
+playwright install chromium --force
+```
+
+### Error: Page crashed or browser context exceeded memory limit
+
+**Cause**: Browser instance consumed too much memory (>1GB) or experienced failures.
 
 **Solution**:
-- Check the detailed error output in the console
-- Verify the URL is accessible in your browser
-- Try running Cypress in headed mode for debugging: `npx cypress open`
-- Check `cypress/e2e/analyze-url.cy.js` for outdated selectors if PageSpeed Insights UI has changed
+- The tool automatically monitors memory and restarts browser contexts
+- This is expected behavior and should resolve automatically
+- If persistent, try reducing `--concurrency` to limit parallel browsers
 
 ### Permission denied when writing to spreadsheet
 
@@ -448,14 +472,14 @@ MOBILE_COLUMN = 'F'   # Change to desired column letter
 DESKTOP_COLUMN = 'G'  # Change to desired column letter
 ```
 
-### Adjusting Cypress Settings
+### Adjusting Playwright Settings
 
-Modify `cypress.config.js` to change:
+Modify `tools/qa/playwright_runner.py` to change:
 - Timeouts
 - Retry attempts
 - Viewport size
-- Video recording
-- Screenshot settings
+- Headless mode
+- Browser context settings
 
 ## Project Structure
 
@@ -467,8 +491,6 @@ Modify `cypress.config.js` to change:
 ├── validate_service_account.py  # Service account validator
 ├── query_audit_trail.py         # Audit trail query utility
 ├── requirements.txt             # Python dependencies
-├── package.json                 # Node.js dependencies
-├── cypress.config.js            # Cypress configuration
 ├── service-account.json         # Google Cloud credentials (not in repo)
 ├── audit_trail.jsonl            # Audit trail log (gitignored)
 ├── README.md                    # This file
@@ -477,18 +499,19 @@ Modify `cypress.config.js` to change:
 │   ├── sheets/
 │   │   └── sheets_client.py    # Google Sheets API wrapper
 │   ├── qa/
-│   │   └── cypress_runner.py   # Cypress automation wrapper
+│   │   └── playwright_runner.py # Playwright automation wrapper
 │   ├── security/
 │   │   ├── service_account_validator.py  # Service account validation
 │   │   ├── url_filter.py       # URL filtering (whitelist/blacklist)
 │   │   ├── audit_trail.py      # Audit trail logging
 │   │   └── rate_limiter.py     # Per-spreadsheet rate limiting
+│   ├── cache/
+│   │   └── cache_manager.py    # Cache management
+│   ├── metrics/
+│   │   └── metrics_collector.py # Metrics collection
 │   └── utils/
-│       └── logger.py            # Logging utilities
-├── cypress/
-│   ├── e2e/
-│   │   └── analyze-url.cy.js   # PageSpeed Insights test
-│   └── results/                 # Generated results (gitignored)
+│       ├── logger.py            # Logging utilities
+│       └── url_validator.py    # URL validation
 └── logs/                        # Audit logs (gitignored)
 ```
 
@@ -534,16 +557,15 @@ done
 
 ## Quick Start Guide
 
-1. **Install Python 3.7+ and Node.js 14+** (if not already installed)
+1. **Install Python 3.7+** (if not already installed)
    - Python: [python.org/downloads](https://www.python.org/downloads/)
-   - Node.js: [nodejs.org](https://nodejs.org/)
 
 2. **Clone/download this project**
 
 3. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
-   npm install
+   playwright install chromium
    ```
 
 4. **Set up Google Cloud service account:**
@@ -569,7 +591,6 @@ done
 - Analysis time depends on website complexity and server response time (typically 5-10 minutes per URL after optimizations)
 - Browser automation depends on PageSpeed Insights UI structure (may need updates if Google changes their interface)
 - URLs must start from row 2 (row 1 is treated as header)
-- Only one Cypress instance can run at a time (do not run `npx cypress open` while audit is running)
 
 ## Support
 
