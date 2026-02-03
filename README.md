@@ -12,6 +12,7 @@ Automated tool for running PageSpeed Insights audits on URLs from Google Sheets 
 - **[PERFORMANCE_OPTIMIZATIONS.md](PERFORMANCE_OPTIMIZATIONS.md)** - Performance improvements and benchmarks
 - **[SECURITY.md](SECURITY.md)** - Security hardening features (detailed)
 - **[SECURITY_QUICK_REFERENCE.md](SECURITY_QUICK_REFERENCE.md)** - Security quick reference guide
+- **[VALIDATION.md](VALIDATION.md)** - Input validation and data quality guide
 
 ## Overview
 
@@ -134,6 +135,11 @@ python run_audit.py --tab "Barranquilla Singles" --service-account "service-acco
 | `--whitelist` | No | - | URL whitelist patterns (space-separated) |
 | `--blacklist` | No | - | URL blacklist patterns (space-separated) |
 | `--dry-run` | No | `False` | Simulate operations without making changes |
+| `--validate-only` | No | `False` | Run validation checks without audit execution |
+| `--skip-dns-validation` | No | `False` | Skip DNS resolution validation |
+| `--skip-redirect-validation` | No | `False` | Skip redirect chain validation |
+| `--dns-timeout` | No | `5.0` | DNS resolution timeout in seconds |
+| `--redirect-timeout` | No | `10.0` | Redirect check timeout in seconds |
 
 ### Examples
 

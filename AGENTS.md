@@ -32,6 +32,12 @@ python run_audit.py --tab "TAB_NAME" --skip-cache
 python run_audit.py --tab "TAB_NAME" --dry-run
 # Optional: URL filtering
 python run_audit.py --tab "TAB_NAME" --whitelist "https://example.com/*" --blacklist "http://*"
+# Optional: Validation only mode (no audit execution)
+python run_audit.py --tab "TAB_NAME" --validate-only
+# Optional: Skip DNS and redirect validation
+python run_audit.py --tab "TAB_NAME" --skip-dns-validation --skip-redirect-validation
+# Optional: Custom DNS and redirect timeouts
+python run_audit.py --tab "TAB_NAME" --dns-timeout 10 --redirect-timeout 15
 ```
 
 **Validate Service Account:**
@@ -135,7 +141,9 @@ The system has been optimized for faster URL processing:
 │   ├── metrics/
 │   │   └── metrics_collector.py  # Prometheus-compatible metrics collection
 │   ├── sheets/
-│   │   └── sheets_client.py  # Google Sheets API wrapper
+│   │   ├── sheets_client.py  # Google Sheets API wrapper
+│   │   ├── schema_validator.py  # Spreadsheet schema validation
+│   │   └── data_quality_checker.py  # Duplicate URL and data quality checks
 │   ├── qa/
 │   │   └── cypress_runner.py # Cypress automation wrapper
 │   ├── cache/
@@ -146,7 +154,8 @@ The system has been optimized for faster URL processing:
 │   │   ├── audit_trail.py    # Audit trail logging
 │   │   └── rate_limiter.py   # Per-spreadsheet rate limiting
 │   └── utils/
-│       └── logger.py         # Logging utilities
+│       ├── logger.py         # Logging utilities
+│       └── url_validator.py  # URL validation (regex, DNS, redirects) and normalization
 ├── cypress/
 │   ├── e2e/
 │   │   └── analyze-url.cy.js # PageSpeed Insights test automation
@@ -185,8 +194,12 @@ The system has been optimized for faster URL processing:
 #### run_audit.py
 - Main orchestrator
 - Handles command-line arguments
+- Performs schema and data quality validation on startup
+- URL validation with DNS and redirect checks
+- URL normalization before analysis
 - Manages the audit loop
 - Collects and reports statistics
+- Supports `--validate-only` mode for validation without audit execution
 
 #### sheets_client.py
 - Authenticates with Google Sheets API
@@ -222,6 +235,25 @@ The system has been optimized for faster URL processing:
 #### logger.py
 - Sets up logging to both console and file
 - Creates timestamped log files in `logs/` directory
+
+#### url_validator.py
+- URL format validation with comprehensive regex
+- DNS resolution validation with configurable timeout
+- Redirect chain detection (flags chains >3 redirects)
+- URL normalization (trailing slashes, query params, case)
+- URLNormalizer class for consistent URL formatting
+
+#### schema_validator.py
+- Validates spreadsheet schema on startup
+- Checks for required columns (A-G)
+- Verifies header row presence
+- Ensures data rows exist
+
+#### data_quality_checker.py
+- Detects exact duplicate URLs
+- Detects normalized duplicates (URLs that normalize to same value)
+- Reports empty URLs
+- Generates detailed duplicate reports with row numbers
 
 #### metrics_collector.py
 - Thread-safe metrics collection
@@ -276,6 +308,67 @@ Cypress runs can fail transiently. The system has multiple layers of retry:
 - The runner tracks existing files before running and identifies new files after
 - This prevents race conditions when running multiple audits
 
+## Input Validation and Data Quality
+
+### Validation Features
+
+The system includes comprehensive input validation and data quality checks:
+
+1. **URL Format Validation**
+   - Regex-based URL format checking
+   - Scheme validation (http/https)
+   - Domain/hostname validation
+   - Dangerous character detection
+
+2. **DNS Resolution**
+   - Verifies domain resolves to IP address
+   - Configurable timeout (default: 5s, use `--dns-timeout`)
+   - Can be disabled with `--skip-dns-validation`
+
+3. **Redirect Chain Detection**
+   - Detects HTTP redirects
+   - Flags URLs with >3 redirects
+   - Configurable timeout (default: 10s, use `--redirect-timeout`)
+   - Can be disabled with `--skip-redirect-validation`
+
+4. **URL Normalization**
+   - Converts scheme and domain to lowercase
+   - Normalizes trailing slashes
+   - Sorts query parameters alphabetically
+   - Applied automatically before analysis
+
+5. **Duplicate URL Detection**
+   - Detects exact duplicates
+   - Detects normalized duplicates (minor variations)
+   - Reports duplicate groups with row numbers
+   - Runs on every audit startup
+
+6. **Spreadsheet Schema Validation**
+   - Validates column structure (A-G required)
+   - Checks header row presence
+   - Ensures data rows exist
+   - Runs automatically on startup
+
+### Validation-Only Mode
+
+Use `--validate-only` to run validations without executing the audit:
+
+```bash
+python run_audit.py --tab "TAB_NAME" --validate-only
+```
+
+This mode performs:
+- Schema validation
+- Data quality checks (duplicates, empty URLs)
+- URL validation (format, DNS, redirects) for all URLs
+- Detailed validation report with pass/fail status
+
+Useful for:
+- Pre-flight checks before running expensive audits
+- Identifying data quality issues
+- Testing URL accessibility
+- Detecting redirect chains
+
 ## Configuration
 
 ### Constants in run_audit.py
@@ -285,6 +378,13 @@ Cypress runs can fail transiently. The system has multiple layers of retry:
 - `DESKTOP_COLUMN`: Column for desktop results (default: 'G')
 - `SCORE_THRESHOLD`: Minimum passing score (default: 80)
 - Default timeout: 600 seconds (can be overridden with --timeout flag)
+
+### Validation Configuration
+- `--dns-timeout`: DNS resolution timeout in seconds (default: 5.0)
+- `--redirect-timeout`: Redirect check timeout in seconds (default: 10.0)
+- `--skip-dns-validation`: Disable DNS resolution checks
+- `--skip-redirect-validation`: Disable redirect chain checks
+- `--validate-only`: Run validation without audit execution
 
 ### Security Configuration
 - `RATE_LIMIT_REQUESTS_PER_MINUTE`: API rate limit per spreadsheet (default: 60)

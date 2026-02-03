@@ -84,6 +84,10 @@ metrics.json
 metrics.prom
 dashboard.html
 
+# Validation reports
+validation_report.json
+validation_report.html
+
 # Security and Audit Trail
 audit_trail.jsonl
 audit_trail*.jsonl

@@ -11,10 +11,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
 
 from sheets import sheets_client
+from sheets.schema_validator import SpreadsheetSchemaValidator
+from sheets.data_quality_checker import DataQualityChecker
 from qa import cypress_runner
 from utils import logger
 from utils.error_metrics import get_global_metrics
 from utils.exceptions import RetryableError, PermanentError
+from utils.url_validator import URLValidator, URLNormalizer
 from metrics.metrics_collector import get_metrics_collector
 from security.url_filter import URLFilter
 
@@ -49,7 +52,10 @@ def process_url(
     processed_count: dict,
     skip_cache: bool = False,
     url_filter: Optional[URLFilter] = None,
-    dry_run: bool = False
+    dry_run: bool = False,
+    url_validator: Optional[URLValidator] = None,
+    validate_dns: bool = True,
+    validate_redirects: bool = True
 ) -> Dict[str, Any]:
     """
     Process a single URL with thread-safe logging and error metrics collection.
@@ -123,6 +129,44 @@ def process_url(
             'error': str(e),
             'error_type': 'invalid_url'
         }
+    
+    if url_validator:
+        is_valid, validation_results = url_validator.validate_url(
+            sanitized_url, 
+            check_dns=validate_dns, 
+            check_redirects=validate_redirects
+        )
+        
+        if not is_valid:
+            error_msg = "; ".join(validation_results['errors'])
+            with log_lock:
+                log.error(f"[{current_idx}/{total_urls}] URL validation failed for {sanitized_url}")
+                log.error(f"  Errors: {error_msg}")
+                if validation_results.get('redirect_count'):
+                    log.error(f"  Redirect count: {validation_results['redirect_count']}")
+                log.info("")
+            metrics_collector.record_url_failure(start_time, reason='validation_failed')
+            return {
+                'row': row_index,
+                'url': url,
+                'error': error_msg,
+                'error_type': 'validation_failed',
+                'validation_results': validation_results
+            }
+        
+        if validation_results.get('redirect_count') and validation_results['redirect_count'] > 0:
+            with log_lock:
+                log.warning(f"  URL has {validation_results['redirect_count']} redirect(s)")
+    
+    try:
+        normalized_url = URLNormalizer.normalize_url(sanitized_url)
+        if normalized_url != sanitized_url:
+            with log_lock:
+                log.info(f"  Normalized URL: {normalized_url}")
+            sanitized_url = normalized_url
+    except Exception as e:
+        with log_lock:
+            log.warning(f"  Could not normalize URL: {e}")
     
     if url_filter and not url_filter.is_allowed(sanitized_url):
         with log_lock:
@@ -423,6 +467,33 @@ def main():
         action='store_true',
         help='Simulate the audit without making any changes to the spreadsheet'
     )
+    parser.add_argument(
+        '--validate-only',
+        action='store_true',
+        help='Perform validation checks only without running the audit'
+    )
+    parser.add_argument(
+        '--skip-dns-validation',
+        action='store_true',
+        help='Skip DNS resolution validation for URLs'
+    )
+    parser.add_argument(
+        '--skip-redirect-validation',
+        action='store_true',
+        help='Skip redirect chain validation for URLs'
+    )
+    parser.add_argument(
+        '--dns-timeout',
+        type=float,
+        default=5.0,
+        help='DNS resolution timeout in seconds (default: 5.0)'
+    )
+    parser.add_argument(
+        '--redirect-timeout',
+        type=float,
+        default=10.0,
+        help='Redirect check timeout in seconds (default: 10.0)'
+    )
     
     args = parser.parse_args()
     
@@ -462,6 +533,21 @@ def main():
         )
         sys.exit(1)
     
+    log.info(f"Validating spreadsheet schema for tab '{args.tab}'...")
+    schema_validator = SpreadsheetSchemaValidator()
+    schema_valid, schema_errors = schema_validator.validate_schema(
+        args.spreadsheet_id, 
+        args.tab, 
+        service
+    )
+    
+    if not schema_valid:
+        log.error("Schema validation failed:")
+        for error in schema_errors:
+            log.error(f"  - {error}")
+        if not args.validate_only:
+            log.error("\nContinuing with audit despite schema issues...")
+    
     log.info(f"Reading URLs from spreadsheet tab '{args.tab}'...")
     try:
         urls = sheets_client.read_urls(args.spreadsheet_id, args.tab, service=service)
@@ -485,9 +571,110 @@ def main():
         log.info("No URLs found in the spreadsheet.")
         sys.exit(0)
     
+    log.info("")
+    data_quality_checker = DataQualityChecker()
+    quality_results = data_quality_checker.perform_quality_checks(urls)
+    log.info("")
+    
     url_filter = None
     if args.whitelist or args.blacklist:
         url_filter = URLFilter(whitelist=args.whitelist, blacklist=args.blacklist)
+    
+    url_validator = URLValidator(
+        dns_timeout=args.dns_timeout,
+        redirect_timeout=args.redirect_timeout
+    )
+    
+    validate_dns = not args.skip_dns_validation
+    validate_redirects = not args.skip_redirect_validation
+    
+    if args.validate_only:
+        log.info("=" * 80)
+        log.info("VALIDATION MODE: Performing URL validations without running audit")
+        log.info("=" * 80)
+        log.info(f"Total URLs to validate: {len(urls)}")
+        log.info(f"DNS validation: {'enabled' if validate_dns else 'disabled'}")
+        log.info(f"Redirect validation: {'enabled' if validate_redirects else 'disabled'}")
+        log.info("")
+        
+        validation_results = []
+        for idx, (row_index, url, _, _, should_skip) in enumerate(urls, start=1):
+            log.info(f"[{idx}/{len(urls)}] Validating {url}...")
+            
+            try:
+                sanitized_url = URLFilter.sanitize_url(url)
+                normalized_url = URLNormalizer.normalize_url(sanitized_url)
+                
+                is_valid, val_result = url_validator.validate_url(
+                    normalized_url,
+                    check_dns=validate_dns,
+                    check_redirects=validate_redirects
+                )
+                
+                validation_results.append({
+                    'row': row_index,
+                    'url': url,
+                    'normalized_url': normalized_url,
+                    'valid': is_valid,
+                    'results': val_result
+                })
+                
+                if is_valid:
+                    log.info(f"  ✓ Valid")
+                    if val_result.get('redirect_count') and val_result['redirect_count'] > 0:
+                        log.info(f"  ⚠ Redirects: {val_result['redirect_count']}")
+                else:
+                    log.error(f"  ✗ Invalid")
+                    for error in val_result['errors']:
+                        log.error(f"    - {error}")
+                
+            except Exception as e:
+                log.error(f"  ✗ Error: {e}")
+                validation_results.append({
+                    'row': row_index,
+                    'url': url,
+                    'valid': False,
+                    'error': str(e)
+                })
+            
+            log.info("")
+        
+        log.info("=" * 80)
+        log.info("VALIDATION SUMMARY")
+        log.info("=" * 80)
+        
+        valid_count = sum(1 for r in validation_results if r.get('valid', False))
+        invalid_count = len(validation_results) - valid_count
+        redirect_count = sum(1 for r in validation_results 
+                           if r.get('results', {}).get('redirect_count', 0) > 0)
+        
+        log.info(f"Total URLs validated: {len(validation_results)}")
+        log.info(f"Valid URLs: {valid_count}")
+        log.info(f"Invalid URLs: {invalid_count}")
+        log.info(f"URLs with redirects: {redirect_count}")
+        
+        if invalid_count > 0:
+            log.info("")
+            log.info("Invalid URLs:")
+            for r in validation_results:
+                if not r.get('valid', False):
+                    log.info(f"  Row {r['row']}: {r['url']}")
+                    if 'results' in r and 'errors' in r['results']:
+                        for error in r['results']['errors']:
+                            log.info(f"    - {error}")
+                    elif 'error' in r:
+                        log.info(f"    - {r['error']}")
+        
+        if redirect_count > 0:
+            log.info("")
+            log.info("URLs with redirects:")
+            for r in validation_results:
+                if r.get('results', {}).get('redirect_count', 0) > 0:
+                    redirect_num = r['results']['redirect_count']
+                    log.info(f"  Row {r['row']}: {r['url']} ({redirect_num} redirect{'s' if redirect_num > 1 else ''})")
+        
+        log.info("=" * 80)
+        sys.exit(0)
     
     log.info(f"Found {len(urls)} URLs to analyze.")
     log.info(f"Using {args.concurrency} concurrent workers.")
@@ -499,6 +686,10 @@ def main():
         log.info(f"URL whitelist: {args.whitelist}")
     if args.blacklist:
         log.info(f"URL blacklist: {args.blacklist}")
+    if not validate_dns:
+        log.info("DNS validation: disabled")
+    if not validate_redirects:
+        log.info("Redirect validation: disabled")
     log.info("")
     
     processed_count = {'count': 0, 'lock': threading.Lock()}
@@ -517,7 +708,10 @@ def main():
                 processed_count,
                 args.skip_cache,
                 url_filter,
-                args.dry_run
+                args.dry_run,
+                url_validator,
+                validate_dns,
+                validate_redirects
             ): url_data for url_data in urls
         }
         
@@ -587,6 +781,10 @@ def main():
     log.info(f"Desktop scores >= {SCORE_THRESHOLD}: {desktop_pass}")
     log.info(f"Desktop scores < {SCORE_THRESHOLD}: {desktop_fail}")
     log.info("")
+    
+    validation_failed = sum(1 for r in results if r.get('error_type') == 'validation_failed')
+    if validation_failed > 0:
+        log.info(f"URLs failed validation: {validation_failed}")
     
     if failed > 0:
         log.info("Failed URLs:")
