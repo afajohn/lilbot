@@ -595,6 +595,45 @@ def _click_analyze_button(page: Page, timeout_ms: int = 10000) -> bool:
     return False
 
 
+def _wait_for_device_buttons(page: Page, timeout_seconds: int = 30) -> bool:
+    """
+    Poll for mobile and desktop buttons to appear on PageSpeed Insights page.
+    Uses multiple selector strategies to maximize detection success.
+    
+    Args:
+        page: Playwright page object
+        timeout_seconds: Maximum time to wait (default: 30)
+        
+    Returns:
+        True if buttons are found and visible, False if timeout
+    """
+    logger = get_logger()
+    start_time = time.time()
+    poll_interval = 1
+    
+    button_selectors = [
+        'button:has-text("Mobile")',
+        'button:has-text("Desktop")',
+        '[role="tab"]:has-text("Mobile")',
+        '[role="tab"]:has-text("Desktop")'
+    ]
+    
+    while time.time() - start_time < timeout_seconds:
+        for selector in button_selectors:
+            try:
+                button = page.locator(selector).first
+                if button.is_visible(timeout=500):
+                    logger.debug(f"Found device button using selector: {selector}")
+                    return True
+            except Exception:
+                continue
+        
+        time.sleep(poll_interval)
+    
+    logger.warning(f"Device buttons not found within {timeout_seconds}s timeout")
+    return False
+
+
 def _wait_for_analysis_completion(page: Page, timeout_seconds: int = 180) -> bool:
     """
     Smart polling to wait for PageSpeed Insights analysis to complete.
@@ -761,23 +800,46 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
                 pool.return_instance(instance, success=False)
                 raise PlaywrightRunnerError("Playwright process exceeded memory limit")
             
+            logger.debug("Waiting for device buttons to be available...")
+            buttons_found = _wait_for_device_buttons(page, timeout_seconds=30)
+            
+            if not buttons_found:
+                logger.warning("Device buttons not found within 30s, attempting score extraction anyway...")
+            
+            time.sleep(2)
+            
             logger.debug("Extracting mobile score...")
             mobile_score = _extract_score_from_element(page, 'mobile')
             mobile_psi_url = _get_psi_report_url(page) if mobile_score and mobile_score < 80 else None
             
             logger.debug("Switching to desktop view...")
-            try:
-                desktop_button = page.locator('button:has-text("Desktop"), [role="tab"]:has-text("Desktop")').first
-                desktop_button.click(timeout=5000)
+            desktop_button_selectors = [
+                'button:has-text("Desktop")',
+                '[role="tab"]:has-text("Desktop")'
+            ]
+            
+            desktop_score = None
+            desktop_psi_url = None
+            desktop_switched = False
+            
+            for selector in desktop_button_selectors:
+                try:
+                    desktop_button = page.locator(selector).first
+                    desktop_button.click(timeout=5000)
+                    desktop_switched = True
+                    logger.debug(f"Successfully switched to desktop view using selector: {selector}")
+                    break
+                except Exception as e:
+                    logger.debug(f"Failed to switch to desktop with selector {selector}: {e}")
+                    continue
+            
+            if desktop_switched:
                 time.sleep(2)
-                
                 logger.debug("Extracting desktop score...")
                 desktop_score = _extract_score_from_element(page, 'desktop')
                 desktop_psi_url = _get_psi_report_url(page) if desktop_score and desktop_score < 80 else None
-            except Exception as e:
-                logger.warning(f"Failed to switch to desktop view: {e}")
-                desktop_score = None
-                desktop_psi_url = None
+            else:
+                logger.warning("Failed to switch to desktop view with all selectors")
             
             if mobile_score is None and desktop_score is None:
                 pool.return_instance(instance, success=False)
