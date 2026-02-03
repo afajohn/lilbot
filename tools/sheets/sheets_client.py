@@ -79,6 +79,10 @@ def _execute_with_retry(func, max_retries: int = 3, initial_delay: float = 2.0):
     """
     logger = get_logger()
     metrics = get_global_metrics()
+    
+    from tools.metrics.metrics_collector import get_metrics_collector
+    metrics_collector = get_metrics_collector()
+    
     delay = initial_delay
     last_exception = None
     was_retried = False
@@ -87,6 +91,7 @@ def _execute_with_retry(func, max_retries: int = 3, initial_delay: float = 2.0):
     for attempt in range(max_retries + 1):
         try:
             _rate_limiter.acquire()
+            metrics_collector.record_api_call_sheets()
             result = func()
             if was_retried:
                 metrics.record_success(func_name, was_retried=True)

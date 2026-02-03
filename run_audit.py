@@ -15,6 +15,7 @@ from qa import cypress_runner
 from utils import logger
 from utils.error_metrics import get_global_metrics
 from utils.exceptions import RetryableError, PermanentError
+from metrics.metrics_collector import get_metrics_collector
 
 
 DEFAULT_SPREADSHEET_ID = '1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I'
@@ -65,7 +66,10 @@ def process_url(
     """
     log = logger.get_logger()
     metrics = get_global_metrics()
+    metrics_collector = get_metrics_collector()
     row_index, url, existing_mobile_psi, existing_desktop_psi, should_skip = url_data
+    
+    start_time = metrics_collector.record_url_start()
     
     if shutdown_event.is_set():
         return {
@@ -83,6 +87,7 @@ def process_url(
         with log_lock:
             log.info(f"[{current_idx}/{total_urls}] Skipping {url} (contains 'passed' or has green background in column F or G)")
             log.info("")
+        metrics_collector.record_url_skipped()
         return {
             'row': row_index,
             'url': url,
@@ -93,6 +98,7 @@ def process_url(
         with log_lock:
             log.info(f"[{current_idx}/{total_urls}] Skipping {url} (both columns F and G already filled)")
             log.info("")
+        metrics_collector.record_url_skipped()
         return {
             'row': row_index,
             'url': url,
@@ -209,6 +215,7 @@ def process_url(
             is_retryable=False,
             traceback=traceback.format_exc()
         )
+        metrics_collector.record_url_failure(start_time, reason='timeout')
         return {
             'row': row_index,
             'url': url,
@@ -234,6 +241,7 @@ def process_url(
             is_retryable=True,
             traceback=traceback.format_exc()
         )
+        metrics_collector.record_url_failure(start_time, reason='cypress')
         return {
             'row': row_index,
             'url': url,
@@ -259,6 +267,7 @@ def process_url(
             is_retryable=False,
             traceback=traceback.format_exc()
         )
+        metrics_collector.record_url_failure(start_time, reason='permanent')
         return {
             'row': row_index,
             'url': url,
@@ -284,6 +293,7 @@ def process_url(
             is_retryable=True,
             traceback=traceback.format_exc()
         )
+        metrics_collector.record_url_failure(start_time, reason='retryable')
         return {
             'row': row_index,
             'url': url,
@@ -309,6 +319,7 @@ def process_url(
             is_retryable=False,
             traceback=traceback.format_exc()
         )
+        metrics_collector.record_url_failure(start_time, reason='unexpected')
         return {
             'row': row_index,
             'url': url,
@@ -529,6 +540,13 @@ def main():
     
     log.info("")
     metrics.print_summary()
+    
+    log.info("")
+    metrics_collector = get_metrics_collector()
+    metrics_collector.save_json_metrics('metrics.json')
+    metrics_collector.save_prometheus_metrics('metrics.prom')
+    log.info("Metrics saved to metrics.json and metrics.prom")
+    log.info("Generate HTML dashboard with: python generate_report.py")
 
 
 if __name__ == '__main__':

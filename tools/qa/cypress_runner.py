@@ -99,12 +99,20 @@ def run_analysis(url: str, timeout: int = 600, max_retries: int = 3, skip_cache:
     logger = get_logger()
     cache_manager = get_cache_manager(enabled=not skip_cache)
     
+    from tools.metrics.metrics_collector import get_metrics_collector
+    metrics_collector = get_metrics_collector()
+    
     if not skip_cache:
         cached_result = cache_manager.get(url)
         if cached_result:
             logger.info(f"Using cached result for {url}")
             metrics.record_success('run_analysis', was_retried=False)
+            metrics_collector.record_cache_hit()
+            metrics_collector.record_api_call_cypress(0)
+            cached_result['_from_cache'] = True
             return cached_result
+        else:
+            metrics_collector.record_cache_miss()
     
     last_exception = None
     was_retried = False
@@ -113,10 +121,12 @@ def run_analysis(url: str, timeout: int = 600, max_retries: int = 3, skip_cache:
         try:
             result = _run_analysis_once(url, timeout)
             metrics.record_success('run_analysis', was_retried=was_retried)
+            metrics_collector.record_api_call_cypress()
             
             if not skip_cache:
                 cache_manager.set(url, result)
             
+            result['_from_cache'] = False
             return result
             
         except PermanentError:

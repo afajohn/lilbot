@@ -78,3 +78,8 @@ coverage.svg
 # Cache
 .cache/
 *.cache
+
+# Metrics and reports
+metrics.json
+metrics.prom
+dashboard.html

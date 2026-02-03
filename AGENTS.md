@@ -38,6 +38,19 @@ python invalidate_cache.py --url "https://example.com"
 python invalidate_cache.py --all
 ```
 
+**Metrics and Monitoring:**
+```bash
+# Metrics are automatically collected during audits
+# Generate HTML dashboard with charts
+python generate_report.py
+# Generate from specific metrics file
+python generate_report.py --input metrics.json --output dashboard.html
+# Export Prometheus metrics
+python generate_report.py --export-prometheus metrics.prom
+# Export JSON metrics
+python generate_report.py --export-json metrics.json
+```
+
 **Build:** Not applicable (Python script)
 
 **Lint:** Not configured
@@ -62,10 +75,12 @@ python -m pytest  # Or use run_tests.ps1 (Windows) or ./run_tests.sh (Unix)
 - **Browser Automation**: Cypress (JavaScript/Node.js)
 - **APIs**: Google Sheets API v4
 - **Caching**: Redis (with file-based fallback)
+- **Monitoring**: Prometheus-compatible metrics, Plotly dashboards
 - **Key Libraries**:
   - `google-api-python-client` - Google Sheets integration
   - `google-auth` - Authentication
   - `redis` - Redis caching backend (optional)
+  - `plotly` - Interactive dashboard charts
   - Cypress - Browser automation for PageSpeed Insights
 
 ## Performance Optimizations
@@ -89,11 +104,14 @@ The system has been optimized for faster URL processing:
 ```
 .
 ├── run_audit.py              # Main entry point - orchestrates the audit
+├── generate_report.py        # Generate HTML metrics dashboard
 ├── list_tabs.py              # Utility to list spreadsheet tabs
 ├── get_service_account_email.py  # Utility to get service account email
 ├── validate_setup.py         # Setup validation script
 ├── invalidate_cache.py       # Cache invalidation utility
 ├── tools/
+│   ├── metrics/
+│   │   └── metrics_collector.py  # Prometheus-compatible metrics collection
 │   ├── sheets/
 │   │   └── sheets_client.py  # Google Sheets API wrapper
 │   ├── qa/
@@ -106,7 +124,10 @@ The system has been optimized for faster URL processing:
 │   ├── e2e/
 │   │   └── analyze-url.cy.js # PageSpeed Insights test automation
 │   └── results/              # Generated JSON results (gitignored)
-└── .cache/                   # File cache storage (gitignored)
+├── .cache/                   # File cache storage (gitignored)
+├── metrics.json              # JSON metrics export (gitignored)
+├── metrics.prom              # Prometheus metrics export (gitignored)
+└── dashboard.html            # HTML metrics dashboard (gitignored)
 ```
 
 ### Data Flow
@@ -124,6 +145,9 @@ The system has been optimized for faster URL processing:
    - For scores >= 80: Cell is filled with the text "passed"
    - For scores < 80: PSI URLs written to columns F (mobile) and G (desktop)
    - Each URL's results are written to the sheet immediately upon completion
+   - **Metrics export**: `metrics.json` and `metrics.prom` files generated
+   - **Dashboard**: HTML dashboard can be generated with `generate_report.py`
+   - **Alerting**: Warnings logged if failure rate exceeds 20%
 
 ### Key Components
 
@@ -167,6 +191,15 @@ The system has been optimized for faster URL processing:
 #### logger.py
 - Sets up logging to both console and file
 - Creates timestamped log files in `logs/` directory
+
+#### metrics_collector.py
+- Thread-safe metrics collection
+- Tracks success/failure rates, processing time, cache efficiency
+- Monitors API quota usage (Sheets and Cypress)
+- Prometheus-compatible export format
+- JSON export for dashboards
+- Automatic alerting when failure rate exceeds 20%
+- Records failure reasons for analysis
 
 ## Code Style
 
@@ -354,6 +387,7 @@ Results JSON files in `cypress/results/` show what data was extracted.
 - `google-api-python-client`: Google Sheets API
 - `python-dotenv`: Environment variables (optional)
 - `redis`: Redis client for caching (optional, falls back to file cache)
+- `plotly`: Interactive dashboard charts and visualizations
 - `argparse`: Command-line parsing (built-in)
 
 ### Node.js (package.json)
@@ -366,6 +400,38 @@ Results JSON files in `cypress/results/` show what data was extracted.
 - Service accounts should have minimal permissions (only Sheets access needed)
 - Spreadsheets should only be shared with necessary service accounts
 
+## Monitoring and Metrics
+
+The system includes comprehensive monitoring:
+
+### Metrics Collected
+- **Success/Failure Rates**: Track audit success percentage and identify issues
+- **Processing Time**: Monitor average time per URL analysis
+- **API Quota Usage**: Count Sheets API and Cypress API calls to stay within limits
+- **Cache Hit Ratio**: Measure cache efficiency (target >70%)
+- **Failure Reasons**: Categorize failures (timeout, cypress, permanent, etc.)
+- **Alerting**: Automatic alerts when failure rate exceeds 20%
+
+### Metrics Formats
+- **Prometheus**: Text format compatible with Prometheus monitoring
+- **JSON**: Structured data for dashboards and analysis
+- **HTML Dashboard**: Interactive charts using Plotly
+
+### Usage
+```bash
+# Run audit (metrics collected automatically)
+python run_audit.py --tab "Your Tab"
+
+# Generate interactive dashboard
+python generate_report.py
+
+# View metrics
+cat metrics.json | python -m json.tool
+cat metrics.prom
+```
+
+For detailed metrics documentation, see `METRICS_GUIDE.md` and `METRICS_QUICK_REFERENCE.md`.
+
 ## Limitations
 
 - Rate limits: Google Sheets API has quotas (100 requests per 100 seconds per user)
@@ -374,3 +440,4 @@ Results JSON files in `cypress/results/` show what data was extracted.
 - Windows encoding issues are mitigated but may still occur with exotic characters
 - URLs must be in column A starting at row 2
 - Results always written to columns F and G (not configurable via CLI)
+- Dashboard requires plotly library for chart generation
