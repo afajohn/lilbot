@@ -1,0 +1,37 @@
+[run]
+source = 
+    tools
+    run_audit
+omit = 
+    */tests/*
+    */test_*.py
+    */__pycache__/*
+    */venv/*
+    */.venv/*
+    */node_modules/*
+    */cypress/*
+    */atlas_framework/*
+    validate_setup.py
+    list_tabs.py
+    get_service_account_email.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+    if 0:
+    if False:
+
+precision = 2
+show_missing = True
+
+[html]
+directory = htmlcov
+
+[xml]
+output = coverage.xml

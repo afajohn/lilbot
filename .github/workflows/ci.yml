@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+    
+    - name: Cache Python dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Cache Node.js dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.npm
+        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-node-
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Install Node.js dependencies
+      run: npm ci
+    
+    - name: Run unit tests with coverage
+      run: |
+        pytest tests/unit/ -v --cov=tools --cov-report=xml --cov-report=term-missing
+    
+    - name: Run integration tests
+      run: |
+        pytest tests/integration/ -v --cov=run_audit --cov-append --cov-report=xml --cov-report=term-missing
+    
+    - name: Check coverage threshold
+      run: |
+        coverage report --fail-under=70
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+    
+    - name: Generate coverage badge
+      if: matrix.python-version == '3.11'
+      run: |
+        pip install coverage-badge
+        coverage-badge -o coverage.svg -f
+    
+    - name: Upload coverage badge
+      if: matrix.python-version == '3.11'
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-badge
+        path: coverage.svg
+
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install linting dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 pylint black isort
+    
+    - name: Run flake8
+      run: |
+        flake8 run_audit.py list_tabs.py get_service_account_email.py validate_setup.py tools/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 run_audit.py list_tabs.py get_service_account_email.py validate_setup.py tools/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      continue-on-error: true
+    
+    - name: Run black check
+      run: |
+        black --check run_audit.py list_tabs.py get_service_account_email.py validate_setup.py tools/
+      continue-on-error: true
+    
+    - name: Run isort check
+      run: |
+        isort --check-only run_audit.py list_tabs.py get_service_account_email.py validate_setup.py tools/
+      continue-on-error: true

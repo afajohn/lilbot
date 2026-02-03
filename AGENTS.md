@@ -32,7 +32,17 @@ python run_audit.py --tab "TAB_NAME" --timeout 1200
 
 **Lint:** Not configured
 
-**Test:** Not configured
+**Test:** 
+```bash
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov=tools --cov=run_audit --cov-report=term-missing
+
+# Using convenience scripts
+python -m pytest  # Or use run_tests.ps1 (Windows) or ./run_tests.sh (Unix)
+```
 
 **Dev Server:** Not applicable (CLI tool)
 
@@ -219,7 +229,61 @@ If PageSpeed Insights UI changes:
 
 ## Testing
 
-No formal test suite exists. Manual testing workflow:
+### Automated Test Suite
+
+A comprehensive test suite is available with 70% code coverage target:
+
+**Quick Start:**
+```bash
+# Install test dependencies
+pip install -r requirements.txt
+
+# Run all tests
+pytest
+
+# Run with coverage report
+pytest --cov=tools --cov=run_audit --cov-report=term-missing
+
+# Check coverage threshold (70%)
+pytest --cov=tools --cov=run_audit --cov-report=term-missing
+coverage report --fail-under=70
+
+# Generate HTML coverage report
+pytest --cov=tools --cov=run_audit --cov-report=html
+```
+
+**Using Convenience Scripts:**
+```bash
+# Windows (PowerShell)
+.\run_tests.ps1                  # Run all tests
+.\run_tests.ps1 unit -Verbose    # Run unit tests with verbose output
+.\run_tests.ps1 coverage -Html   # Run with HTML coverage report
+
+# Unix/Linux/Mac
+./run_tests.sh                   # Run all tests
+./run_tests.sh unit --verbose    # Run unit tests with verbose output
+./run_tests.sh coverage --html   # Run with HTML coverage report
+
+# Or use Make (Unix/Linux/Mac)
+make test                        # Run all tests
+make test-unit                   # Run unit tests
+make test-cov                    # Run with coverage
+make test-cov-check              # Run and check 70% threshold
+```
+
+**Test Structure:**
+- `tests/unit/test_sheets_client.py` - Google Sheets API wrapper tests
+- `tests/unit/test_cypress_runner.py` - Cypress automation tests
+- `tests/unit/test_logger.py` - Logging utilities tests
+- `tests/integration/test_run_audit.py` - Main audit orchestration tests
+- `tests/conftest.py` - Shared fixtures and test configuration
+
+**Continuous Integration:**
+Tests run automatically on GitHub Actions for every push and pull request, testing against Python 3.8, 3.9, 3.10, and 3.11.
+
+### Manual Testing Workflow
+
+For manual end-to-end testing:
 
 1. Run `python validate_setup.py` to verify setup
 2. Run `python list_tabs.py` to verify Google Sheets access
