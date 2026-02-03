@@ -303,6 +303,9 @@ def process_url(
                 log.info(f"Successfully analyzed {url}")
                 log.info("")
         
+        from_cache = result.get('_from_cache', False)
+        metrics_collector.record_url_success(start_time, from_cache=from_cache)
+        
         return {
             'row': row_index,
             'url': url,

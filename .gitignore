@@ -46,6 +46,7 @@ coverage.svg
 metrics.json
 metrics.prom
 dashboard.html
+pool_stats.json
 
 # Validation reports
 validation_report.json
