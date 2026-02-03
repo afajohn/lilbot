@@ -87,3 +87,25 @@ def temp_service_account_file(tmp_path):
     file_path = tmp_path / "test-service-account.json"
     file_path.write_text(json.dumps(service_account_data))
     return str(file_path)
+
+
+@pytest.fixture
+def sample_playwright_result():
+    return {
+        'mobile_score': 85,
+        'desktop_score': 90,
+        'mobile_psi_url': None,
+        'desktop_psi_url': None,
+        '_warm_start': False
+    }
+
+
+@pytest.fixture
+def sample_playwright_result_failing():
+    return {
+        'mobile_score': 65,
+        'desktop_score': 70,
+        'mobile_psi_url': 'https://pagespeed.web.dev/mobile-report',
+        'desktop_psi_url': 'https://pagespeed.web.dev/desktop-report',
+        '_warm_start': False
+    }
