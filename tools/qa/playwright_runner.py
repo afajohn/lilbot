@@ -554,9 +554,51 @@ def _monitor_process_memory(instance: PlaywrightInstance, max_memory_mb: float =
     return memory_mb >= max_memory_mb
 
 
+def _click_analyze_button(page: Page, timeout_ms: int = 10000) -> bool:
+    """
+    Click the Analyze button using multiple selector strategies with retry logic.
+    
+    Args:
+        page: Playwright page object
+        timeout_ms: Timeout in milliseconds for each selector attempt
+        
+    Returns:
+        True if button was clicked successfully, False otherwise
+    """
+    logger = get_logger()
+    
+    selectors = [
+        'button:has-text("Analyze")',
+        '[aria-label*="Analyze"]',
+        'button.lh-button--primary',
+        'button[type="submit"]',
+        'button:has-text("analyze")',
+        '[aria-label*="analyze"]',
+        'button.analyze-button',
+        'button[class*="analyze"]',
+        'button[class*="primary"]',
+        'form button[type="submit"]'
+    ]
+    
+    for i, selector in enumerate(selectors, 1):
+        try:
+            logger.debug(f"Attempting to click analyze button with selector {i}/{len(selectors)}: {selector}")
+            button = page.locator(selector).first
+            button.click(timeout=timeout_ms)
+            logger.info(f"Successfully clicked analyze button using selector: {selector}")
+            return True
+        except Exception as e:
+            logger.debug(f"Selector {selector} failed: {e}")
+            continue
+    
+    logger.error(f"All {len(selectors)} analyze button selectors failed")
+    return False
+
+
 def _wait_for_analysis_completion(page: Page, timeout_seconds: int = 180) -> bool:
     """
     Smart polling to wait for PageSpeed Insights analysis to complete.
+    Waits for mobile/desktop buttons to appear before proceeding.
     
     Args:
         page: Playwright page object
@@ -577,7 +619,21 @@ def _wait_for_analysis_completion(page: Page, timeout_seconds: int = 180) -> boo
             
             if len(score_elements) >= 1:
                 logger.debug(f"Found {len(score_elements)} score elements")
-                return True
+                
+                try:
+                    mobile_button = page.locator('button:has-text("Mobile"), [role="tab"]:has-text("Mobile")').first
+                    desktop_button = page.locator('button:has-text("Desktop"), [role="tab"]:has-text("Desktop")').first
+                    
+                    mobile_visible = mobile_button.is_visible(timeout=1000)
+                    desktop_visible = desktop_button.is_visible(timeout=1000)
+                    
+                    if mobile_visible or desktop_visible:
+                        logger.debug(f"Mobile/Desktop buttons are visible (mobile: {mobile_visible}, desktop: {desktop_visible})")
+                        return True
+                    else:
+                        logger.debug("Score elements found but mobile/desktop buttons not yet visible, continuing to poll...")
+                except Exception as e:
+                    logger.debug(f"Mobile/Desktop buttons not yet visible: {e}")
             
         except Exception as e:
             logger.debug(f"Polling error: {e}")
@@ -681,9 +737,11 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
             time.sleep(0.5)
             
             logger.debug("Clicking analyze button...")
-            analyze_button = page.locator('button:has-text("Analyze"), button[type="submit"]').first
             page_load_start = time.time()
-            analyze_button.click()
+            button_clicked = _click_analyze_button(page, timeout_ms=10000)
+            if not button_clicked:
+                pool.return_instance(instance, success=False)
+                raise PlaywrightRunnerError("Failed to click analyze button - all selectors failed")
             
             logger.debug("Waiting for analysis to complete...")
             analysis_completed = _wait_for_analysis_completion(page, timeout_seconds=min(180, timeout))
