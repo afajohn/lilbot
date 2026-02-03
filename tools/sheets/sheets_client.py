@@ -381,12 +381,16 @@ def _check_skip_conditions(row_data: List, row_idx: int, row_values: List) -> bo
     """
     Check if a row should be skipped based on:
     1. BOTH cells F AND G containing the word "passed" or having background color #b7e1cd
-    2. Partial fills (only F or only G) do NOT cause skip - allow processing of empty column
+    2. NEVER skip if either F or G contains a PSI URL (error state requiring reprocessing)
+    3. NEVER skip if either F or G contains an HTTP URL (error message or other URL)
+    4. NEVER skip if either F or G is empty (partial processing needed)
+    5. Only skip when both F and G explicitly indicate success (passed text or green background)
     
     Skip logic:
-    - Skip if F has "passed" text AND G has "passed" text
-    - Skip if F has #b7e1cd color AND G has #b7e1cd color
-    - Skip if F has "passed" or #b7e1cd AND G has "passed" or #b7e1cd (any combination)
+    - Skip ONLY if F has ("passed" text or #b7e1cd) AND G has ("passed" text or #b7e1cd)
+    - Do NOT skip if F or G contains PSI URL (https://pagespeed.web.dev/analysis)
+    - Do NOT skip if F or G contains any other HTTP/HTTPS URL
+    - Do NOT skip if F or G is empty or whitespace-only
     - Do NOT skip if only F is filled (process G)
     - Do NOT skip if only G is filled (process F)
     
@@ -396,16 +400,20 @@ def _check_skip_conditions(row_data: List, row_idx: int, row_values: List) -> bo
         row_values: Raw values from the row
         
     Returns:
-        True if the row should be skipped (both F and G are complete), False otherwise
+        True if the row should be skipped (both F and G show passed status), False otherwise
     """
     logger = get_logger()
     
-    mobile_value = row_values[5] if len(row_values) > 5 else None
-    desktop_value = row_values[6] if len(row_values) > 6 else None
+    mobile_value = row_values[5].strip() if len(row_values) > 5 and row_values[5] else None
+    desktop_value = row_values[6].strip() if len(row_values) > 6 and row_values[6] else None
     
+    actual_row_number = row_idx + 2
+    
+    # Check for "passed" text in both columns
     mobile_has_passed_text = mobile_value and 'passed' in str(mobile_value).lower()
     desktop_has_passed_text = desktop_value and 'passed' in str(desktop_value).lower()
     
+    # Check for green background in both columns
     mobile_has_green_bg = False
     desktop_has_green_bg = False
     
@@ -420,12 +428,68 @@ def _check_skip_conditions(row_data: List, row_idx: int, row_values: List) -> bo
             desktop_cell = row_cells[6]
             desktop_has_green_bg = _has_target_background_color(desktop_cell)
     
+    # Check if either column contains a PSI URL (error state)
+    mobile_has_psi_url = mobile_value and 'pagespeed.web.dev/analysis' in str(mobile_value).lower()
+    desktop_has_psi_url = desktop_value and 'pagespeed.web.dev/analysis' in str(desktop_value).lower()
+    
+    if mobile_has_psi_url or desktop_has_psi_url:
+        logger.debug(
+            f"Processing row {actual_row_number}: Contains PSI URL(s) - must reprocess",
+            extra={
+                'row': actual_row_number,
+                'mobile_has_psi_url': mobile_has_psi_url,
+                'desktop_has_psi_url': desktop_has_psi_url,
+                'mobile_value': mobile_value,
+                'desktop_value': desktop_value,
+                'skip_reason': 'PSI URLs indicate previous failure'
+            }
+        )
+        return False
+    
+    # Check if either column contains any HTTP/HTTPS URL (error message or other URL)
+    mobile_has_url = mobile_value and (mobile_value.lower().startswith('http://') or mobile_value.lower().startswith('https://'))
+    desktop_has_url = desktop_value and (desktop_value.lower().startswith('http://') or desktop_value.lower().startswith('https://'))
+    
+    if mobile_has_url or desktop_has_url:
+        logger.debug(
+            f"Processing row {actual_row_number}: Contains HTTP/HTTPS URL(s) - must reprocess",
+            extra={
+                'row': actual_row_number,
+                'mobile_has_url': mobile_has_url,
+                'desktop_has_url': desktop_has_url,
+                'mobile_value': mobile_value,
+                'desktop_value': desktop_value,
+                'skip_reason': 'URLs indicate error state or previous failure'
+            }
+        )
+        return False
+    
+    # Check if either column is empty (partial processing needed)
+    # But only check this if the cell doesn't have green background (passed status)
+    if (not mobile_value and not mobile_has_green_bg) or (not desktop_value and not desktop_has_green_bg):
+        empty_cols = []
+        if not mobile_value and not mobile_has_green_bg:
+            empty_cols.append('F')
+        if not desktop_value and not desktop_has_green_bg:
+            empty_cols.append('G')
+        
+        logger.debug(
+            f"Processing row {actual_row_number}: Column(s) {', '.join(empty_cols)} empty - must process",
+            extra={
+                'row': actual_row_number,
+                'mobile_empty': not mobile_value and not mobile_has_green_bg,
+                'desktop_empty': not desktop_value and not desktop_has_green_bg,
+                'skip_reason': 'Empty columns require processing'
+            }
+        )
+        return False
+    
+    # A column is "complete" only if it has passed text OR green background
     mobile_complete = mobile_has_passed_text or mobile_has_green_bg
     desktop_complete = desktop_has_passed_text or desktop_has_green_bg
     
+    # Only skip if BOTH columns are complete (passed status)
     should_skip = mobile_complete and desktop_complete
-    
-    actual_row_number = row_idx + 2
     
     if should_skip:
         skip_reasons = []
@@ -439,7 +503,7 @@ def _check_skip_conditions(row_data: List, row_idx: int, row_values: List) -> bo
             skip_reasons.append(f"G{actual_row_number} has #b7e1cd background")
         
         logger.debug(
-            f"Skipping row {actual_row_number}: Both columns complete - {', '.join(skip_reasons)}",
+            f"Skipping row {actual_row_number}: Both columns show passed status - {', '.join(skip_reasons)}",
             extra={
                 'row': actual_row_number,
                 'mobile_complete': mobile_complete,
@@ -447,22 +511,26 @@ def _check_skip_conditions(row_data: List, row_idx: int, row_values: List) -> bo
                 'mobile_passed_text': mobile_has_passed_text,
                 'mobile_green_bg': mobile_has_green_bg,
                 'desktop_passed_text': desktop_has_passed_text,
-                'desktop_green_bg': desktop_has_green_bg
+                'desktop_green_bg': desktop_has_green_bg,
+                'skip_reason': 'Both columns have passed status'
             }
         )
     else:
         status_parts = []
         if mobile_complete:
-            status_parts.append("F complete")
+            status_parts.append(f"F{actual_row_number} complete")
         else:
-            status_parts.append("F incomplete")
+            reason = 'empty' if not mobile_value else 'no passed status'
+            status_parts.append(f"F{actual_row_number} incomplete ({reason})")
+        
         if desktop_complete:
-            status_parts.append("G complete")
+            status_parts.append(f"G{actual_row_number} complete")
         else:
-            status_parts.append("G incomplete")
+            reason = 'empty' if not desktop_value else 'no passed status'
+            status_parts.append(f"G{actual_row_number} incomplete ({reason})")
         
         logger.debug(
-            f"Processing row {actual_row_number}: {', '.join(status_parts)} - partial fill allows processing",
+            f"Processing row {actual_row_number}: {', '.join(status_parts)} - partial or no passed status requires processing",
             extra={
                 'row': actual_row_number,
                 'mobile_complete': mobile_complete,
@@ -470,7 +538,10 @@ def _check_skip_conditions(row_data: List, row_idx: int, row_values: List) -> bo
                 'mobile_passed_text': mobile_has_passed_text,
                 'mobile_green_bg': mobile_has_green_bg,
                 'desktop_passed_text': desktop_has_passed_text,
-                'desktop_green_bg': desktop_has_green_bg
+                'desktop_green_bg': desktop_has_green_bg,
+                'mobile_value': mobile_value,
+                'desktop_value': desktop_value,
+                'skip_reason': 'One or both columns need processing'
             }
         )
     
