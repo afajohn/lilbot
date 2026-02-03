@@ -26,7 +26,13 @@ class PlaywrightRunnerError(Exception):
     pass
 
 
-class PlaywrightTimeoutError(PlaywrightRunnerError):
+class PlaywrightAnalysisTimeoutError(PlaywrightRunnerError):
+    """Timeout during analysis - should abort, not retry"""
+    pass
+
+
+class PlaywrightSelectorTimeoutError(PlaywrightRunnerError):
+    """Timeout finding selectors - should retry with fresh page load"""
     pass
 
 
@@ -425,16 +431,16 @@ def _setup_request_interception(page: Page, instance: PlaywrightInstance) -> Non
         page.route('**/*', handle_route)
 
 
-def run_analysis(url: str, timeout: int = 600, max_retries: int = 3, skip_cache: bool = False) -> Dict[str, Optional[int | str]]:
+def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_retry: bool = False) -> Dict[str, Optional[int | str]]:
     """
     Run Playwright analysis for a given URL to get PageSpeed Insights scores.
-    Includes circuit breaker protection, error metrics collection, caching, and optimizations.
+    Implements persistent retry-until-success with exponential backoff for transient errors.
     
     Args:
         url: The URL to analyze
-        timeout: Maximum time in seconds to wait for analysis to complete (default: 600)
-        max_retries: Maximum number of retry attempts for transient errors (default: 3)
+        timeout: Maximum time in seconds for overall operation (default: 600)
         skip_cache: If True, bypass cache and force fresh analysis (default: False)
+        force_retry: If True, bypass circuit breaker during critical runs (default: False)
         
     Returns:
         Dictionary with keys:
@@ -444,8 +450,7 @@ def run_analysis(url: str, timeout: int = 600, max_retries: int = 3, skip_cache:
             - desktop_psi_url: URL to desktop PSI report (if score < 80, else None)
             
     Raises:
-        PlaywrightRunnerError: If Playwright execution fails
-        PlaywrightTimeoutError: If analysis exceeds timeout
+        PlaywrightAnalysisTimeoutError: If overall analysis exceeds timeout (not retryable)
         PermanentError: If there's a permanent error (e.g., Playwright not installed)
     """
     if not PLAYWRIGHT_AVAILABLE:
@@ -478,12 +483,26 @@ def run_analysis(url: str, timeout: int = 600, max_retries: int = 3, skip_cache:
     if timeout < effective_timeout:
         timeout = effective_timeout
     
+    overall_start_time = time.time()
     last_exception = None
     was_retried = False
+    attempt = 0
+    initial_backoff = 5
+    max_backoff = 60
+    current_backoff = initial_backoff
     
-    for attempt in range(max_retries + 1):
+    while True:
+        attempt += 1
+        
+        if time.time() - overall_start_time >= timeout:
+            elapsed = time.time() - overall_start_time
+            logger.error(f"Overall analysis timeout after {elapsed:.1f}s for {url}")
+            metrics.record_failure('run_analysis')
+            progressive_timeout.record_failure()
+            raise PlaywrightAnalysisTimeoutError(f"Analysis exceeded overall timeout of {timeout}s")
+        
         try:
-            result = _run_analysis_once(url, timeout)
+            result = _run_analysis_once(url, timeout, force_retry=force_retry)
             metrics.record_success('run_analysis', was_retried=was_retried)
             metrics_collector.record_api_call_cypress()
             progressive_timeout.record_success()
@@ -499,54 +518,69 @@ def run_analysis(url: str, timeout: int = 600, max_retries: int = 3, skip_cache:
             progressive_timeout.record_failure()
             raise
             
-        except PlaywrightTimeoutError as e:
-            last_exception = e
-            progressive_timeout.record_failure()
-            metrics.record_error(
-                error_type='PlaywrightTimeoutError',
-                function_name='run_analysis',
-                error_message=str(e),
-                is_retryable=False,
-                attempt=attempt + 1,
-                traceback=traceback.format_exc()
-            )
+        except PlaywrightAnalysisTimeoutError:
             metrics.record_failure('run_analysis')
+            progressive_timeout.record_failure()
             raise
             
-        except (PlaywrightRunnerError, Exception) as e:
+        except PlaywrightSelectorTimeoutError as e:
             last_exception = e
             was_retried = True
             progressive_timeout.record_failure()
             
             metrics.record_error(
-                error_type=type(e).__name__,
+                error_type='PlaywrightSelectorTimeoutError',
                 function_name='run_analysis',
                 error_message=str(e),
                 is_retryable=True,
-                attempt=attempt + 1,
+                attempt=attempt,
                 traceback=traceback.format_exc()
             )
             
-            if attempt < max_retries:
-                wait_time = 5
-                logger.warning(
-                    f"Retrying analysis for {url} after error (attempt {attempt + 1}/{max_retries + 1})",
-                    extra={
-                        'url': url,
-                        'attempt': attempt + 1,
-                        'error_type': type(e).__name__,
-                        'retry_delay': wait_time
-                    }
-                )
-                time.sleep(wait_time)
-                continue
-            else:
-                metrics.record_failure('run_analysis')
-                raise
-    
-    if last_exception:
-        metrics.record_failure('run_analysis')
-        raise last_exception
+            logger.warning(
+                f"Selector timeout for {url}, retrying with fresh page load (attempt {attempt})",
+                extra={
+                    'url': url,
+                    'attempt': attempt,
+                    'error_type': 'PlaywrightSelectorTimeoutError',
+                    'retry_delay': current_backoff
+                }
+            )
+            
+            time.sleep(current_backoff)
+            current_backoff = min(current_backoff * 2, max_backoff)
+            continue
+            
+        except (PlaywrightRunnerError, RetryableError, Exception) as e:
+            last_exception = e
+            was_retried = True
+            progressive_timeout.record_failure()
+            
+            is_retryable = not isinstance(e, PermanentError)
+            
+            metrics.record_error(
+                error_type=type(e).__name__,
+                function_name='run_analysis',
+                error_message=str(e),
+                is_retryable=is_retryable,
+                attempt=attempt,
+                traceback=traceback.format_exc()
+            )
+            
+            logger.warning(
+                f"Retryable error for {url}, retrying (attempt {attempt})",
+                extra={
+                    'url': url,
+                    'attempt': attempt,
+                    'error_type': type(e).__name__,
+                    'retry_delay': current_backoff,
+                    'error_message': str(e)
+                }
+            )
+            
+            time.sleep(current_backoff)
+            current_backoff = min(current_backoff * 2, max_backoff)
+            continue
 
 
 def _monitor_process_memory(instance: PlaywrightInstance, max_memory_mb: float = 1024) -> bool:
@@ -768,7 +802,7 @@ def _get_psi_report_url(page: Page) -> Optional[str]:
     return None
 
 
-def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]:
+def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dict[str, Optional[int | str]]:
     """
     Internal function to run a single Playwright analysis attempt with circuit breaker protection,
     result caching, memory monitoring, and resource blocking optimizations.
@@ -811,8 +845,13 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
             nav_time = time.time() - nav_start
             
             logger.debug(f"Entering URL: {url}")
-            url_input = page.locator('input[type="url"], input[name="url"], input[placeholder*="URL"]').first
-            url_input.fill(url)
+            try:
+                url_input = page.locator('input[type="url"], input[name="url"], input[placeholder*="URL"]').first
+                url_input.fill(url)
+            except Exception as e:
+                pool.return_instance(instance, success=False)
+                raise PlaywrightSelectorTimeoutError(f"Failed to find URL input field: {e}")
+            
             time.sleep(0.5)
             
             logger.debug("Clicking analyze button...")
@@ -820,18 +859,18 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
             button_clicked = _click_analyze_button(page, timeout_ms=10000)
             if not button_clicked:
                 pool.return_instance(instance, success=False)
-                raise PlaywrightRunnerError("Failed to click analyze button - all selectors failed")
+                raise PlaywrightSelectorTimeoutError("Failed to click analyze button - all selectors failed")
             
             logger.debug("Waiting for analysis to complete...")
             analysis_completed = _wait_for_analysis_completion(page, timeout_seconds=min(180, timeout))
             
             if not analysis_completed:
                 elapsed = time.time() - analysis_start_time
-                if elapsed >= timeout:
+                if elapsed >= timeout * 0.9:
                     pool.return_instance(instance, success=False)
-                    raise PlaywrightTimeoutError(f"Analysis exceeded {timeout} seconds timeout")
+                    raise PlaywrightAnalysisTimeoutError(f"Analysis exceeded {timeout} seconds timeout")
                 pool.return_instance(instance, success=False)
-                raise PlaywrightRunnerError("Analysis did not complete - score elements not found")
+                raise PlaywrightSelectorTimeoutError("Analysis did not complete - score elements not found")
             
             page_load_time = time.time() - page_load_start if page_load_start else 0.0
             
@@ -879,11 +918,12 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
                 desktop_score = _extract_score_from_element(page, 'desktop')
                 desktop_psi_url = _get_psi_report_url(page) if desktop_score and desktop_score < 80 else None
             else:
-                logger.warning("Failed to switch to desktop view with all selectors")
+                pool.return_instance(instance, success=False)
+                raise PlaywrightSelectorTimeoutError("Failed to switch to desktop view with all selectors")
             
             if mobile_score is None and desktop_score is None:
                 pool.return_instance(instance, success=False)
-                raise PlaywrightRunnerError("Failed to extract any scores from PageSpeed Insights")
+                raise PlaywrightSelectorTimeoutError("Failed to extract any scores from PageSpeed Insights")
             
             instance.record_analysis(page_load_time)
             
@@ -913,7 +953,7 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
                 '_total_requests': instance.blocking_stats.total_requests
             }
             
-        except PlaywrightTimeoutError:
+        except (PlaywrightAnalysisTimeoutError, PlaywrightSelectorTimeoutError):
             if page:
                 try:
                     page.close()
@@ -930,25 +970,35 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
                     pass
             pool.return_instance(instance, success=False)
             
-            if isinstance(e, PlaywrightRunnerError):
+            if isinstance(e, (PlaywrightRunnerError, PermanentError)):
                 raise
             
             raise PlaywrightRunnerError(f"Playwright execution failed: {e}") from e
     
-    try:
-        return circuit_breaker.call(_execute_playwright)
-    except Exception as e:
-        if "Circuit breaker" in str(e) and "is OPEN" in str(e):
-            logger.error(
-                f"Circuit breaker is open - PageSpeed Insights unavailable",
-                extra={
-                    'circuit_state': str(circuit_breaker.state.value),
-                    'failure_count': circuit_breaker.failure_count,
-                    'url': url
-                }
-            )
-            raise PlaywrightRunnerError(str(e)) from e
-        raise
+    if force_retry:
+        logger.debug(f"Force retry enabled - bypassing circuit breaker for {url}")
+        try:
+            return _execute_playwright()
+        except Exception as e:
+            if "Circuit breaker" in str(e) and "is OPEN" in str(e):
+                logger.warning(f"Circuit breaker bypassed due to --force-retry flag")
+                return _execute_playwright()
+            raise
+    else:
+        try:
+            return circuit_breaker.call(_execute_playwright)
+        except Exception as e:
+            if "Circuit breaker" in str(e) and "is OPEN" in str(e):
+                logger.error(
+                    f"Circuit breaker is open - PageSpeed Insights unavailable",
+                    extra={
+                        'circuit_state': str(circuit_breaker.state.value),
+                        'failure_count': circuit_breaker.failure_count,
+                        'url': url
+                    }
+                )
+                raise PlaywrightRunnerError(str(e)) from e
+            raise
 
 
 def shutdown_pool():

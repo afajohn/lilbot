@@ -65,6 +65,9 @@ python run_audit.py --tab "TAB_NAME" --dns-timeout 10 --redirect-timeout 15
 
 # Optional: Disable progress bar (useful for logging/CI)
 python run_audit.py --tab "TAB_NAME" --no-progress-bar
+
+# Optional: Force retry mode (bypass circuit breaker during critical runs)
+python run_audit.py --tab "TAB_NAME" --force-retry
 ```
 
 **Validate Service Account:**
@@ -279,7 +282,9 @@ The system has been comprehensively optimized for faster URL processing:
 #### playwright_runner.py
 - Manages Playwright browser instances with advanced pooling
 - Runs PageSpeed Insights analysis with proper error handling
-- Handles timeouts and retries (up to 3 retry attempts with fixed 5s wait)
+- **Persistent Retry Logic**: Infinite retry with exponential backoff (5s-60s) for retryable errors until success or explicit timeout
+- **Smart Timeout Handling**: Distinguishes between analysis timeout (abort) vs selector timeout (retry with fresh page load)
+- **Circuit Breaker**: Protects against cascading failures, can be bypassed with `force_retry` flag
 - Returns structured results with performance metrics
 - **Progressive Timeout**: Starts at 300s, increases to 600s after first failure
 - **Instance Pooling**: Maintains pool of up to 3 reusable browser contexts for warm starts
@@ -364,10 +369,14 @@ URLs are read from `A2:A` (not `A:A`) to skip the header row. Row enumeration st
 - Continue processing remaining URLs even if one fails
 
 ### Retry Logic
-Playwright runs can fail transiently. The system has multiple layers of retry:
-- Playwright internal retries: 2 attempts per run
-- Python runner retries: Up to 3 attempts with fixed 5s wait between attempts
-- Total possible attempts: Up to 6 (2 × 3)
+Playwright runs can fail transiently. The system implements persistent retry-until-success:
+- **Infinite retry with exponential backoff**: For retryable errors, the system retries indefinitely until successful or explicit timeout/permanent error
+- **Exponential backoff**: Starts at 5s, doubles on each retry, max 60s between retries
+- **Timeout handling**:
+  - **Analysis timeout** (PlaywrightAnalysisTimeoutError): Overall operation timeout - aborts immediately, not retryable
+  - **Selector timeout** (PlaywrightSelectorTimeoutError): Failed to find page elements - retries with fresh page load
+- **Circuit breaker**: Protects against cascading failures by opening after 5 consecutive failures
+- **Force retry mode**: Use `--force-retry` flag to bypass circuit breaker during critical runs
 
 ## Input Validation and Data Quality
 

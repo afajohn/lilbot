@@ -140,8 +140,8 @@ class TestProcessUrl:
     
     @patch('qa.playwright_runner.run_analysis')
     def test_process_url_playwright_timeout(self, mock_run_analysis, mock_google_service):
-        from qa.playwright_runner import PlaywrightTimeoutError
-        mock_run_analysis.side_effect = PlaywrightTimeoutError("Timeout after 600 seconds")
+        from qa.playwright_runner import PlaywrightAnalysisTimeoutError
+        mock_run_analysis.side_effect = PlaywrightAnalysisTimeoutError("Timeout after 600 seconds")
         
         url_data = (2, 'https://example.com', None, None, False)
         processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
