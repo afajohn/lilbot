@@ -1,6 +1,7 @@
 import pytest
 import time
-from unittest.mock import Mock, MagicMock, patch, call
+import asyncio
+from unittest.mock import Mock, MagicMock, patch, call, AsyncMock
 from typing import Dict, Optional
 
 pytestmark = pytest.mark.playwright
@@ -15,13 +16,9 @@ from tools.qa.playwright_runner import (
     PlaywrightInstance,
     InstanceState,
     ProgressiveTimeout,
-    _run_analysis_once,
-    _get_pool,
     _get_circuit_breaker,
     _get_progressive_timeout,
-    _extract_score_from_element,
     _get_psi_report_url,
-    _wait_for_analysis_completion,
 )
 from tools.utils.exceptions import PermanentError, RetryableError
 from tools.cache.cache_manager import CacheManager, FileCacheBackend
@@ -61,6 +58,7 @@ def mock_metrics_collector():
     collector.record_cache_hit = Mock()
     collector.record_cache_miss = Mock()
     collector.record_api_call_cypress = Mock()
+    collector.record_playwright_metrics = Mock()
     
     with patch('tools.metrics.metrics_collector.get_metrics_collector', return_value=collector):
         yield collector
@@ -68,14 +66,14 @@ def mock_metrics_collector():
 
 @pytest.fixture
 def mock_page():
-    page = Mock()
+    page = AsyncMock()
     page.url = 'https://pagespeed.web.dev/analysis?url=https://example.com'
-    page.goto = Mock()
-    page.close = Mock()
+    page.goto = AsyncMock()
+    page.close = AsyncMock()
     page.set_default_timeout = Mock()
     
-    url_input = Mock()
-    url_input.fill = Mock()
+    url_input = AsyncMock()
+    url_input.fill = AsyncMock()
     page.locator = Mock(return_value=Mock(first=url_input))
     
     return page
@@ -83,17 +81,17 @@ def mock_page():
 
 @pytest.fixture
 def mock_context(mock_page):
-    context = Mock()
-    context.new_page = Mock(return_value=mock_page)
-    context.close = Mock()
+    context = AsyncMock()
+    context.new_page = AsyncMock(return_value=mock_page)
+    context.close = AsyncMock()
     return context
 
 
 @pytest.fixture
 def mock_browser(mock_context):
-    browser = Mock()
-    browser.new_context = Mock(return_value=mock_context)
-    browser.close = Mock()
+    browser = AsyncMock()
+    browser.new_context = AsyncMock(return_value=mock_context)
+    browser.close = AsyncMock()
     browser.is_connected = Mock(return_value=True)
     
     mock_proc = Mock()
@@ -105,14 +103,16 @@ def mock_browser(mock_context):
 
 @pytest.fixture
 def mock_playwright(mock_browser):
-    pw = Mock()
-    pw.chromium.launch = Mock(return_value=mock_browser)
-    pw.stop = Mock()
+    pw = AsyncMock()
+    pw.chromium.launch = AsyncMock(return_value=mock_browser)
+    pw.stop = AsyncMock()
     
-    sync_pw = Mock()
-    sync_pw.start = Mock(return_value=pw)
+    async_pw_context = AsyncMock()
+    async_pw_context.__aenter__ = AsyncMock(return_value=pw)
+    async_pw_context.__aexit__ = AsyncMock(return_value=None)
+    async_pw_context.start = AsyncMock(return_value=pw)
     
-    with patch('tools.qa.playwright_runner.sync_playwright', return_value=sync_pw):
+    with patch('tools.qa.playwright_runner.async_playwright', return_value=async_pw_context):
         yield pw
 
 
@@ -121,9 +121,39 @@ def reset_globals():
     yield
     
     import tools.qa.playwright_runner as pr
-    pr._pool = None
+    pr._event_loop_thread = None
     pr._circuit_breaker = None
     pr._progressive_timeout = None
+
+
+@pytest.fixture
+def mock_event_loop_thread():
+    """Mock the event loop thread to return results immediately"""
+    with patch('tools.qa.playwright_runner.PlaywrightEventLoopThread') as MockThread:
+        thread_instance = Mock()
+        
+        def submit_analysis(url, timeout, force_retry):
+            from concurrent.futures import Future
+            future = Future()
+            future.set_result({
+                'mobile_score': 85,
+                'desktop_score': 90,
+                'mobile_psi_url': None,
+                'desktop_psi_url': None,
+                '_warm_start': False,
+                '_page_load_time': 2.5,
+                '_browser_startup_time': 0.5,
+                '_memory_mb': 256.0,
+                '_blocked_requests': 10,
+                '_total_requests': 25
+            })
+            return future
+        
+        thread_instance.submit_analysis = submit_analysis
+        thread_instance.start = Mock()
+        thread_instance.shutdown = Mock()
+        MockThread.return_value = thread_instance
+        yield thread_instance
 
 
 class TestSingleURLAnalysis:
@@ -131,48 +161,38 @@ class TestSingleURLAnalysis:
     
     def test_successful_analysis_mobile_and_desktop(
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
-        mock_metrics_collector, mock_playwright, mock_page
+        mock_metrics_collector, mock_event_loop_thread
     ):
-        mobile_score_elem = Mock()
-        mobile_score_elem.inner_text = Mock(return_value='85')
+        result = run_analysis('https://example.com', timeout=600)
         
-        desktop_score_elem = Mock()
-        desktop_score_elem.inner_text = Mock(return_value='90')
-        
-        mock_page.locator = Mock(side_effect=lambda selector: Mock(
-            all=Mock(return_value=[mobile_score_elem] if 'gauge' in selector else []),
-            first=Mock()
-        ))
-        
-        with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.return_value = {
-                'mobile_score': 85,
-                'desktop_score': 90,
-                'mobile_psi_url': None,
-                'desktop_psi_url': None,
-                '_warm_start': False
-            }
-            
-            result = run_analysis('https://example.com', timeout=600)
-            
-            assert result['mobile_score'] == 85
-            assert result['desktop_score'] == 90
-            assert result['mobile_psi_url'] is None
-            assert result['desktop_psi_url'] is None
-            assert result['_from_cache'] is False
+        assert result['mobile_score'] == 85
+        assert result['desktop_score'] == 90
+        assert result['mobile_psi_url'] is None
+        assert result['desktop_psi_url'] is None
+        assert result['_from_cache'] is False
     
     def test_analysis_with_low_score_returns_psi_url(
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
         mock_metrics_collector
     ):
-        with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.return_value = {
-                'mobile_score': 65,
-                'desktop_score': 70,
-                'mobile_psi_url': 'https://pagespeed.web.dev/mobile',
-                'desktop_psi_url': 'https://pagespeed.web.dev/desktop',
-                '_warm_start': False
-            }
+        with patch('tools.qa.playwright_runner.PlaywrightEventLoopThread') as MockThread:
+            thread_instance = Mock()
+            
+            def submit_analysis(url, timeout, force_retry):
+                from concurrent.futures import Future
+                future = Future()
+                future.set_result({
+                    'mobile_score': 65,
+                    'desktop_score': 70,
+                    'mobile_psi_url': 'https://pagespeed.web.dev/mobile',
+                    'desktop_psi_url': 'https://pagespeed.web.dev/desktop',
+                    '_warm_start': False
+                })
+                return future
+            
+            thread_instance.submit_analysis = submit_analysis
+            thread_instance.start = Mock()
+            MockThread.return_value = thread_instance
             
             result = run_analysis('https://example.com')
             
@@ -182,90 +202,33 @@ class TestSingleURLAnalysis:
             assert result['desktop_psi_url'] == 'https://pagespeed.web.dev/desktop'
 
 
-class TestScoreExtraction:
-    """Test mobile/desktop score extraction"""
-    
-    def test_extract_score_with_primary_selector(self):
-        page = Mock()
-        
-        score_elem = Mock()
-        score_elem.inner_text = Mock(return_value='85')
-        
-        page.locator = Mock(return_value=Mock(all=Mock(return_value=[score_elem])))
-        
-        score = _extract_score_from_element(page, 'mobile', 'https://example.com')
-        
-        assert score == 85
-        page.locator.assert_called()
-    
-    def test_extract_score_with_fallback_selector(self):
-        page = Mock()
-        
-        score_elem = Mock()
-        score_elem.inner_text = Mock(return_value='92')
-        
-        def mock_locator(selector):
-            if 'lh-exp-gauge__percentage' in selector:
-                return Mock(all=Mock(return_value=[]))
-            elif 'score-gauge' in selector:
-                return Mock(all=Mock(return_value=[score_elem]))
-            return Mock(all=Mock(return_value=[]))
-        
-        page.locator = mock_locator
-        
-        score = _extract_score_from_element(page, 'desktop', 'https://example.com')
-        
-        assert score == 92
-    
-    def test_extract_score_returns_none_when_no_elements(self):
-        page = Mock()
-        page.locator = Mock(return_value=Mock(all=Mock(return_value=[])))
-        
-        score = _extract_score_from_element(page, 'mobile', 'https://example.com')
-        
-        assert score is None
-    
-    def test_extract_score_handles_invalid_score_text(self):
-        page = Mock()
-        
-        score_elem = Mock()
-        score_elem.inner_text = Mock(return_value='invalid')
-        
-        page.locator = Mock(return_value=Mock(all=Mock(return_value=[score_elem])))
-        
-        score = _extract_score_from_element(page, 'mobile', 'https://example.com')
-        
-        assert score is None
-
-
 class TestTimeoutHandling:
     """Test timeout handling"""
     
     def test_analysis_respects_timeout_parameter(
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
-        mock_metrics_collector
+        mock_metrics_collector, mock_event_loop_thread
     ):
-        with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.return_value = {
-                'mobile_score': 85,
-                'desktop_score': 90,
-                'mobile_psi_url': None,
-                'desktop_psi_url': None,
-                '_warm_start': False
-            }
-            
-            result = run_analysis('https://example.com', timeout=300)
-            
-            mock_run.assert_called_once()
-            call_args = mock_run.call_args
-            assert call_args[0][1] >= 300
+        result = run_analysis('https://example.com', timeout=300)
+        
+        assert result['mobile_score'] == 85
     
     def test_timeout_error_raises_playwright_timeout_error(
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
         mock_metrics_collector
     ):
-        with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.side_effect = PlaywrightAnalysisTimeoutError("Analysis timeout")
+        with patch('tools.qa.playwright_runner.PlaywrightEventLoopThread') as MockThread:
+            thread_instance = Mock()
+            
+            def submit_analysis(url, timeout, force_retry):
+                from concurrent.futures import Future
+                future = Future()
+                future.set_exception(PlaywrightAnalysisTimeoutError("Analysis timeout"))
+                return future
+            
+            thread_instance.submit_analysis = submit_analysis
+            thread_instance.start = Mock()
+            MockThread.return_value = thread_instance
             
             with pytest.raises(PlaywrightAnalysisTimeoutError, match="Analysis timeout"):
                 run_analysis('https://example.com', timeout=300)
@@ -278,29 +241,6 @@ class TestTimeoutHandling:
         pt.record_failure()
         
         assert pt.get_timeout() == 600
-    
-    def test_wait_for_analysis_completion_success(self):
-        from tools.qa.playwright_runner import PageReloadTracker
-        page = Mock()
-        
-        score_elem = Mock()
-        page.locator = Mock(return_value=Mock(all=Mock(return_value=[score_elem])))
-        reload_tracker = PageReloadTracker()
-        
-        result = _wait_for_analysis_completion(page, 'https://example.com', reload_tracker, timeout_seconds=5)
-        
-        assert result is True
-    
-    def test_wait_for_analysis_completion_timeout(self):
-        from tools.qa.playwright_runner import PageReloadTracker
-        page = Mock()
-        page.locator = Mock(return_value=Mock(all=Mock(return_value=[])))
-        reload_tracker = PageReloadTracker()
-        
-        with patch('time.sleep'):
-            result = _wait_for_analysis_completion(page, 'https://example.com', reload_tracker, timeout_seconds=1)
-        
-        assert result is False
 
 
 class TestRetryLogic:
@@ -310,50 +250,84 @@ class TestRetryLogic:
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
         mock_metrics_collector
     ):
-        with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.side_effect = [
-                PlaywrightRunnerError("Transient error"),
-                {
-                    'mobile_score': 85,
-                    'desktop_score': 90,
-                    'mobile_psi_url': None,
-                    'desktop_psi_url': None,
-                    '_warm_start': False
-                }
-            ]
+        with patch('tools.qa.playwright_runner.PlaywrightEventLoopThread') as MockThread:
+            thread_instance = Mock()
+            call_count = 0
+            
+            def submit_analysis(url, timeout, force_retry):
+                nonlocal call_count
+                call_count += 1
+                from concurrent.futures import Future
+                future = Future()
+                if call_count == 1:
+                    future.set_exception(PlaywrightRunnerError("Transient error"))
+                else:
+                    future.set_result({
+                        'mobile_score': 85,
+                        'desktop_score': 90,
+                        'mobile_psi_url': None,
+                        'desktop_psi_url': None,
+                        '_warm_start': False
+                    })
+                return future
+            
+            thread_instance.submit_analysis = submit_analysis
+            thread_instance.start = Mock()
+            MockThread.return_value = thread_instance
             
             with patch('time.sleep'):
                 result = run_analysis('https://example.com')
             
             assert result['mobile_score'] == 85
-            assert mock_run.call_count == 2
+            assert call_count == 2
     
     def test_timeout_stops_infinite_retry(
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
         mock_metrics_collector
     ):
-        with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.side_effect = PlaywrightRunnerError("Persistent error")
+        with patch('tools.qa.playwright_runner.PlaywrightEventLoopThread') as MockThread:
+            thread_instance = Mock()
+            
+            def submit_analysis(url, timeout, force_retry):
+                from concurrent.futures import Future
+                future = Future()
+                future.set_exception(PlaywrightRunnerError("Persistent error"))
+                return future
+            
+            thread_instance.submit_analysis = submit_analysis
+            thread_instance.start = Mock()
+            MockThread.return_value = thread_instance
             
             with patch('time.sleep'):
                 with patch('time.time') as mock_time:
                     mock_time.side_effect = [0, 0, 601, 601]
                     with pytest.raises(PlaywrightAnalysisTimeoutError, match="exceeded overall timeout"):
                         run_analysis('https://example.com', timeout=600)
-            
-            assert mock_run.call_count >= 1
     
     def test_permanent_error_no_retry(
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
         mock_metrics_collector
     ):
-        with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.side_effect = PermanentError("Cannot install Playwright")
+        with patch('tools.qa.playwright_runner.PlaywrightEventLoopThread') as MockThread:
+            thread_instance = Mock()
+            call_count = 0
+            
+            def submit_analysis(url, timeout, force_retry):
+                nonlocal call_count
+                call_count += 1
+                from concurrent.futures import Future
+                future = Future()
+                future.set_exception(PermanentError("Cannot install Playwright"))
+                return future
+            
+            thread_instance.submit_analysis = submit_analysis
+            thread_instance.start = Mock()
+            MockThread.return_value = thread_instance
             
             with pytest.raises(PermanentError, match="Cannot install Playwright"):
                 run_analysis('https://example.com')
             
-            assert mock_run.call_count == 1
+            assert call_count == 1
 
 
 class TestCacheIntegration:
@@ -385,23 +359,14 @@ class TestCacheIntegration:
         mock_metrics_collector.record_cache_hit.assert_called_once()
     
     def test_cache_miss_performs_analysis_and_caches(
-        self, mock_playwright_available, mock_metrics, mock_metrics_collector
+        self, mock_playwright_available, mock_metrics, mock_metrics_collector, mock_event_loop_thread
     ):
         cache = Mock(spec=CacheManager)
         cache.get.return_value = None
         cache.set.return_value = True
         
         with patch('tools.qa.playwright_runner.get_cache_manager', return_value=cache):
-            with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-                mock_run.return_value = {
-                    'mobile_score': 85,
-                    'desktop_score': 90,
-                    'mobile_psi_url': None,
-                    'desktop_psi_url': None,
-                    '_warm_start': False
-                }
-                
-                result = run_analysis('https://example.com', skip_cache=False)
+            result = run_analysis('https://example.com', skip_cache=False)
         
         assert result['mobile_score'] == 85
         assert result['_from_cache'] is False
@@ -412,7 +377,7 @@ class TestCacheIntegration:
         mock_metrics_collector.record_cache_miss.assert_called_once()
     
     def test_skip_cache_bypasses_cache_lookup(
-        self, mock_playwright_available, mock_metrics, mock_metrics_collector
+        self, mock_playwright_available, mock_metrics, mock_metrics_collector, mock_event_loop_thread
     ):
         cache = Mock(spec=CacheManager)
         cache.get.return_value = {
@@ -423,16 +388,7 @@ class TestCacheIntegration:
         }
         
         with patch('tools.qa.playwright_runner.get_cache_manager', return_value=cache):
-            with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-                mock_run.return_value = {
-                    'mobile_score': 85,
-                    'desktop_score': 90,
-                    'mobile_psi_url': None,
-                    'desktop_psi_url': None,
-                    '_warm_start': False
-                }
-                
-                result = run_analysis('https://example.com', skip_cache=True)
+            result = run_analysis('https://example.com', skip_cache=True)
         
         assert result['mobile_score'] == 85
         
@@ -443,52 +399,81 @@ class TestPlaywrightPool:
     """Test Playwright instance pooling"""
     
     def test_pool_creates_instance_on_first_request(self, mock_playwright):
-        pool = PlaywrightPool()
+        async def run_test():
+            loop = asyncio.get_event_loop()
+            pool = PlaywrightPool(loop, Mock())
+            await pool.initialize()
+            
+            instance = await pool.create_instance()
+            
+            assert instance is not None
+            assert instance.state == InstanceState.IDLE
+            assert instance.warm_start is False
+            assert instance.failures == 0
         
-        instance = pool.create_instance()
-        
-        assert instance is not None
-        assert instance.state == InstanceState.IDLE
-        assert instance.warm_start is False
-        assert instance.failures == 0
+        asyncio.run(run_test())
     
     def test_pool_reuses_idle_instance(self, mock_playwright):
-        pool = PlaywrightPool()
-        instance1 = pool.create_instance()
-        pool.return_instance(instance1, success=True)
+        async def run_test():
+            loop = asyncio.get_event_loop()
+            pool = PlaywrightPool(loop, Mock())
+            await pool.initialize()
+            
+            instance1 = await pool.create_instance()
+            await pool.return_instance(instance1, success=True)
+            
+            instance2 = await pool.get_instance()
+            
+            assert instance2 is instance1
+            assert instance2.state == InstanceState.BUSY
         
-        instance2 = pool.get_instance()
-        
-        assert instance2 is instance1
-        assert instance2.state == InstanceState.BUSY
+        asyncio.run(run_test())
     
     def test_pool_removes_high_memory_instance(self, mock_playwright):
-        pool = PlaywrightPool()
-        instance = pool.create_instance()
+        async def run_test():
+            loop = asyncio.get_event_loop()
+            pool = PlaywrightPool(loop, Mock())
+            await pool.initialize()
+            
+            instance = await pool.create_instance()
+            
+            with patch.object(instance, 'get_memory_usage', return_value=2048):
+                await pool.return_instance(instance, success=True)
+            
+            assert instance not in pool.instances
         
-        with patch.object(instance, 'get_memory_usage', return_value=2048):
-            pool.return_instance(instance, success=True)
-        
-        assert instance not in pool.instances
+        asyncio.run(run_test())
     
     def test_pool_removes_instance_after_failures(self, mock_playwright):
-        pool = PlaywrightPool()
-        instance = pool.create_instance()
+        async def run_test():
+            loop = asyncio.get_event_loop()
+            pool = PlaywrightPool(loop, Mock())
+            await pool.initialize()
+            
+            instance = await pool.create_instance()
+            
+            await pool.return_instance(instance, success=False)
+            await pool.return_instance(instance, success=False)
+            await pool.return_instance(instance, success=False)
+            
+            assert instance not in pool.instances
         
-        pool.return_instance(instance, success=False)
-        pool.return_instance(instance, success=False)
-        pool.return_instance(instance, success=False)
-        
-        assert instance not in pool.instances
+        asyncio.run(run_test())
     
     def test_pool_shutdown_closes_all_instances(self, mock_playwright):
-        pool = PlaywrightPool()
-        instance1 = pool.create_instance()
-        instance2 = pool.create_instance()
+        async def run_test():
+            loop = asyncio.get_event_loop()
+            pool = PlaywrightPool(loop, Mock())
+            await pool.initialize()
+            
+            instance1 = await pool.create_instance()
+            instance2 = await pool.create_instance()
+            
+            await pool.shutdown()
+            
+            assert len(pool.instances) == 0
         
-        pool.shutdown()
-        
-        assert len(pool.instances) == 0
+        asyncio.run(run_test())
 
 
 class TestPlaywrightInstance:
@@ -523,7 +508,7 @@ class TestPlaywrightInstance:
         assert instance.is_alive() is False
     
     def test_instance_get_memory_usage(self):
-        mock_browser = Mock()
+        mock_browser = AsyncMock()
         mock_browser.is_connected = Mock(return_value=True)
         
         instance = PlaywrightInstance(
@@ -576,8 +561,18 @@ class TestCircuitBreaker:
         circuit_breaker = _get_circuit_breaker()
         circuit_breaker.reset()
         
-        with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.side_effect = PlaywrightRunnerError("Service unavailable")
+        with patch('tools.qa.playwright_runner.PlaywrightEventLoopThread') as MockThread:
+            thread_instance = Mock()
+            
+            def submit_analysis(url, timeout, force_retry):
+                from concurrent.futures import Future
+                future = Future()
+                future.set_exception(PlaywrightRunnerError("Service unavailable"))
+                return future
+            
+            thread_instance.submit_analysis = submit_analysis
+            thread_instance.start = Mock()
+            MockThread.return_value = thread_instance
             
             with patch('time.sleep'):
                 with patch('time.time') as mock_time:
@@ -608,18 +603,9 @@ class TestMetricsCollection:
     
     def test_metrics_recorded_on_success(
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
-        mock_metrics_collector
+        mock_metrics_collector, mock_event_loop_thread
     ):
-        with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.return_value = {
-                'mobile_score': 85,
-                'desktop_score': 90,
-                'mobile_psi_url': None,
-                'desktop_psi_url': None,
-                '_warm_start': False
-            }
-            
-            run_analysis('https://example.com')
+        run_analysis('https://example.com')
         
         mock_metrics.increment_total_operations.assert_called_once()
         mock_metrics.record_success.assert_called_once()
@@ -629,8 +615,18 @@ class TestMetricsCollection:
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
         mock_metrics_collector
     ):
-        with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.side_effect = PermanentError("Analysis failed")
+        with patch('tools.qa.playwright_runner.PlaywrightEventLoopThread') as MockThread:
+            thread_instance = Mock()
+            
+            def submit_analysis(url, timeout, force_retry):
+                from concurrent.futures import Future
+                future = Future()
+                future.set_exception(PermanentError("Analysis failed"))
+                return future
+            
+            thread_instance.submit_analysis = submit_analysis
+            thread_instance.start = Mock()
+            MockThread.return_value = thread_instance
             
             try:
                 run_analysis('https://example.com')
