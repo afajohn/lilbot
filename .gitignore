@@ -79,3 +79,7 @@ test_scenarios.json
 
 # Debug artifacts (playwright_runner.py)
 debug_screenshots/
+
+# Threading diagnostics
+threading_diagnostics.json
+threading_diagnostics_*.json

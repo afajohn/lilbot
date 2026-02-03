@@ -46,6 +46,10 @@ class MetricsCollector:
         self._playwright_blocked_requests = 0
         self._playwright_blocked_by_type: Dict[str, int] = defaultdict(int)
         
+        self._threading_greenlet_errors = 0
+        self._threading_conflicts = 0
+        self._threading_event_loop_failures = 0
+        
     def record_url_start(self):
         """Record start of URL processing"""
         with self._lock:
@@ -169,6 +173,13 @@ class MetricsCollector:
             if len(self._playwright_memory_usage) > 10000:
                 self._playwright_memory_usage = self._playwright_memory_usage[-10000:]
     
+    def record_threading_metrics(self, greenlet_errors: int = 0, thread_conflicts: int = 0, event_loop_failures: int = 0):
+        """Record threading-related metrics"""
+        with self._lock:
+            self._threading_greenlet_errors += greenlet_errors
+            self._threading_conflicts += thread_conflicts
+            self._threading_event_loop_failures += event_loop_failures
+    
     def _check_failure_rate(self):
         """Check if failure rate exceeds alert threshold"""
         analyzed = self._successful_urls + self._failed_urls
@@ -289,6 +300,11 @@ class MetricsCollector:
                     'blocked_requests': self._playwright_blocked_requests,
                     'blocking_ratio_percent': blocking_ratio,
                     'total_page_loads': len(self._playwright_page_load_times)
+                },
+                'threading': {
+                    'greenlet_errors': self._threading_greenlet_errors,
+                    'thread_conflicts': self._threading_conflicts,
+                    'event_loop_failures': self._threading_event_loop_failures
                 }
             }
     
@@ -350,6 +366,14 @@ class MetricsCollector:
         lines.append("# HELP psi_audit_alert_active Whether failure rate alert is active")
         lines.append("# TYPE psi_audit_alert_active gauge")
         lines.append(f"psi_audit_alert_active {1 if metrics['alert_triggered'] else 0}")
+        lines.append("")
+        
+        threading = metrics['threading']
+        lines.append("# HELP psi_audit_threading_errors_total Threading-related errors")
+        lines.append("# TYPE psi_audit_threading_errors_total counter")
+        lines.append(f"psi_audit_threading_errors_total{{type=\"greenlet\"}} {threading['greenlet_errors']}")
+        lines.append(f"psi_audit_threading_errors_total{{type=\"conflict\"}} {threading['thread_conflicts']}")
+        lines.append(f"psi_audit_threading_errors_total{{type=\"event_loop_failure\"}} {threading['event_loop_failures']}")
         lines.append("")
         
         pw = metrics['playwright']
@@ -448,6 +472,9 @@ class MetricsCollector:
             self._playwright_total_requests = 0
             self._playwright_blocked_requests = 0
             self._playwright_blocked_by_type.clear()
+            self._threading_greenlet_errors = 0
+            self._threading_conflicts = 0
+            self._threading_event_loop_failures = 0
 
 
 _global_metrics_collector = None

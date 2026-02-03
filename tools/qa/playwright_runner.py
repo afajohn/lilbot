@@ -4,12 +4,14 @@ import threading
 import traceback
 import psutil
 import asyncio
-from typing import Dict, Optional, Set, List, Any, Callable
+import sys
+from typing import Dict, Optional, Set, List, Any, Callable, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from queue import Queue, Empty
 from datetime import datetime
 from concurrent.futures import Future
+from collections import defaultdict
 
 try:
     from playwright.async_api import async_playwright, Browser, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, Route, Request, Playwright
@@ -91,6 +93,21 @@ def set_debug_mode(enabled: bool):
 def get_debug_mode() -> bool:
     """Check if debug mode is enabled"""
     return DEBUG_MODE
+
+
+def _get_thread_info() -> str:
+    """Get current thread ID and name for logging"""
+    thread = threading.current_thread()
+    return f"[Thread-{thread.ident}:{thread.name}]"
+
+
+def _log_thread_operation(logger, operation: str, details: str = ""):
+    """Log an operation with thread information"""
+    thread_info = _get_thread_info()
+    msg = f"{thread_info} {operation}"
+    if details:
+        msg += f" - {details}"
+    logger.debug(msg)
 
 
 def _get_timestamp_filename(url: str, suffix: str = "") -> str:
@@ -312,6 +329,140 @@ async def _create_enhanced_error_message(
 
 
 @dataclass
+class ThreadingMetrics:
+    """Track threading-related metrics and issues"""
+    greenlet_errors: int = 0
+    thread_conflicts: int = 0
+    event_loop_failures: int = 0
+    browser_context_creation_threads: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    page_creation_threads: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    async_operation_threads: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    lock = threading.Lock()
+    
+    def record_greenlet_error(self):
+        """Record a greenlet-related error"""
+        with self.lock:
+            self.greenlet_errors += 1
+    
+    def record_thread_conflict(self):
+        """Record a thread conflict"""
+        with self.lock:
+            self.thread_conflicts += 1
+    
+    def record_event_loop_failure(self):
+        """Record an event loop failure"""
+        with self.lock:
+            self.event_loop_failures += 1
+    
+    def record_context_creation(self, thread_id: int):
+        """Record browser context creation on a thread"""
+        with self.lock:
+            self.browser_context_creation_threads[thread_id] += 1
+    
+    def record_page_creation(self, thread_id: int):
+        """Record page creation on a thread"""
+        with self.lock:
+            self.page_creation_threads[thread_id] += 1
+    
+    def record_async_operation(self, thread_id: int):
+        """Record async operation on a thread"""
+        with self.lock:
+            self.async_operation_threads[thread_id] += 1
+    
+    def get_metrics(self) -> Dict:
+        """Get all threading metrics"""
+        with self.lock:
+            return {
+                'greenlet_errors': self.greenlet_errors,
+                'thread_conflicts': self.thread_conflicts,
+                'event_loop_failures': self.event_loop_failures,
+                'context_creation_by_thread': dict(self.browser_context_creation_threads),
+                'page_creation_by_thread': dict(self.page_creation_threads),
+                'async_operations_by_thread': dict(self.async_operation_threads)
+            }
+    
+    def reset(self):
+        """Reset all metrics"""
+        with self.lock:
+            self.greenlet_errors = 0
+            self.thread_conflicts = 0
+            self.event_loop_failures = 0
+            self.browser_context_creation_threads.clear()
+            self.page_creation_threads.clear()
+            self.async_operation_threads.clear()
+
+
+_threading_metrics = ThreadingMetrics()
+
+
+def get_threading_metrics() -> Dict:
+    """Get current threading metrics"""
+    return _threading_metrics.get_metrics()
+
+
+def reset_threading_metrics():
+    """Reset threading metrics"""
+    _threading_metrics.reset()
+
+
+@dataclass
+class EventLoopHealth:
+    """Track event loop health status"""
+    last_heartbeat: float = 0.0
+    heartbeat_failures: int = 0
+    is_responsive: bool = True
+    thread_id: Optional[int] = None
+    lock = threading.Lock()
+    
+    def update_heartbeat(self):
+        """Update last heartbeat timestamp"""
+        with self.lock:
+            self.last_heartbeat = time.time()
+            self.is_responsive = True
+            self.heartbeat_failures = 0
+    
+    def record_failure(self):
+        """Record a heartbeat failure"""
+        with self.lock:
+            self.heartbeat_failures += 1
+            if self.heartbeat_failures >= 3:
+                self.is_responsive = False
+    
+    def check_health(self, timeout_seconds: float = 30.0) -> Tuple[bool, str]:
+        """
+        Check if event loop is healthy
+        
+        Returns:
+            Tuple of (is_healthy, status_message)
+        """
+        with self.lock:
+            if self.last_heartbeat == 0.0:
+                return True, "Event loop not yet initialized"
+            
+            time_since_heartbeat = time.time() - self.last_heartbeat
+            
+            if time_since_heartbeat > timeout_seconds:
+                return False, f"Event loop unresponsive for {time_since_heartbeat:.1f}s"
+            
+            if not self.is_responsive:
+                return False, f"Event loop marked as unresponsive after {self.heartbeat_failures} failures"
+            
+            return True, f"Healthy (last heartbeat {time_since_heartbeat:.1f}s ago)"
+    
+    def get_status(self) -> Dict:
+        """Get detailed health status"""
+        with self.lock:
+            time_since_heartbeat = time.time() - self.last_heartbeat if self.last_heartbeat > 0.0 else None
+            return {
+                'last_heartbeat': self.last_heartbeat,
+                'time_since_heartbeat': time_since_heartbeat,
+                'heartbeat_failures': self.heartbeat_failures,
+                'is_responsive': self.is_responsive,
+                'thread_id': self.thread_id
+            }
+
+
+@dataclass
 class PageReloadTracker:
     """Track page reload attempts for recovery logic"""
     reload_count: int = 0
@@ -461,47 +612,98 @@ class PlaywrightEventLoopThread:
         self.logger = get_logger()
         self._playwright: Optional[Playwright] = None
         self._pool: Optional['PlaywrightPool'] = None
+        self._health = EventLoopHealth()
+        self._heartbeat_task = None
         
     def start(self):
         """Start the event loop thread"""
         if self.thread is None or not self.thread.is_alive():
             self._shutdown = False
-            self.thread = threading.Thread(target=self._run_event_loop, daemon=True)
+            self.thread = threading.Thread(target=self._run_event_loop, daemon=True, name="PlaywrightEventLoop")
             self.thread.start()
+            _log_thread_operation(self.logger, "Starting Playwright event loop thread", f"Thread ID: {self.thread.ident}")
             time.sleep(0.5)
     
     def _run_event_loop(self):
         """Run the event loop in a dedicated thread"""
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        thread_id = threading.current_thread().ident
+        _log_thread_operation(self.logger, "Event loop thread started", f"Thread ID: {thread_id}")
+        
+        self._health.thread_id = thread_id
         
         try:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            _log_thread_operation(self.logger, "Event loop created", f"Loop ID: {id(self.loop)}")
+            
             self.loop.run_until_complete(self._process_requests())
         except Exception as e:
-            self.logger.error(f"Event loop thread error: {e}")
+            self.logger.error(f"{_get_thread_info()} Event loop thread error: {e}", exc_info=True)
+            _threading_metrics.record_event_loop_failure()
         finally:
+            _log_thread_operation(self.logger, "Event loop shutting down")
+            if self._heartbeat_task and not self._heartbeat_task.done():
+                self._heartbeat_task.cancel()
+            
             if self._pool:
-                self.loop.run_until_complete(self._pool.shutdown())
+                try:
+                    self.loop.run_until_complete(self._pool.shutdown())
+                except Exception as e:
+                    self.logger.error(f"{_get_thread_info()} Error shutting down pool: {e}")
+            
             if self._playwright:
                 try:
                     self.loop.run_until_complete(self._playwright.stop())
-                except Exception:
-                    pass
-            self.loop.close()
+                except Exception as e:
+                    self.logger.error(f"{_get_thread_info()} Error stopping playwright: {e}")
+            
+            try:
+                self.loop.close()
+                _log_thread_operation(self.logger, "Event loop closed")
+            except Exception as e:
+                self.logger.error(f"{_get_thread_info()} Error closing loop: {e}")
+    
+    async def _heartbeat(self):
+        """Send periodic heartbeat to track event loop health"""
+        while not self._shutdown:
+            try:
+                self._health.update_heartbeat()
+                _log_thread_operation(self.logger, "Event loop heartbeat", f"Thread ID: {threading.current_thread().ident}")
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"{_get_thread_info()} Heartbeat error: {e}")
+                self._health.record_failure()
+                _threading_metrics.record_event_loop_failure()
     
     async def _process_requests(self):
         """Process incoming analysis requests"""
+        _log_thread_operation(self.logger, "Starting request processing", f"Loop: {id(self.loop)}")
+        
+        self._heartbeat_task = asyncio.create_task(self._heartbeat())
+        
         while not self._shutdown:
             try:
                 request = self.request_queue.get(timeout=0.1)
                 
                 if request is None:
+                    _log_thread_operation(self.logger, "Received shutdown signal")
                     break
+                
+                _log_thread_operation(self.logger, f"Processing analysis request", f"URL: {request.url}")
+                _threading_metrics.record_async_operation(threading.current_thread().ident)
                 
                 try:
                     if self._pool is None:
+                        _log_thread_operation(self.logger, "Initializing Playwright pool")
                         self._pool = PlaywrightPool(self.loop, self.logger)
                         await self._pool.initialize()
+                    
+                    is_healthy, status = self._health.check_health()
+                    if not is_healthy:
+                        self.logger.warning(f"{_get_thread_info()} Event loop health check failed: {status}")
+                        _threading_metrics.record_event_loop_failure()
                     
                     result = await _run_analysis_once_async(
                         request.url,
@@ -510,16 +712,30 @@ class PlaywrightEventLoopThread:
                         self._pool
                     )
                     request.future.set_result(result)
+                    _log_thread_operation(self.logger, "Analysis completed successfully", f"URL: {request.url}")
                 except Exception as e:
+                    error_type = type(e).__name__
+                    _log_thread_operation(self.logger, f"Analysis failed with {error_type}", f"URL: {request.url}, Error: {e}")
+                    
+                    if 'greenlet' in str(e).lower():
+                        _threading_metrics.record_greenlet_error()
+                        self.logger.error(f"{_get_thread_info()} Greenlet error detected: {e}", exc_info=True)
+                    
                     request.future.set_exception(e)
                     
             except Empty:
                 continue
             except Exception as e:
-                self.logger.error(f"Error processing request: {e}")
+                self.logger.error(f"{_get_thread_info()} Error processing request: {e}", exc_info=True)
+                _threading_metrics.record_event_loop_failure()
+        
+        _log_thread_operation(self.logger, "Request processing ended")
     
     def submit_analysis(self, url: str, timeout: int, force_retry: bool) -> Future:
         """Submit an analysis request and return a Future"""
+        caller_thread_info = _get_thread_info()
+        _log_thread_operation(self.logger, f"Submitting analysis request from {caller_thread_info}", f"URL: {url}")
+        
         future = Future()
         request = AnalysisRequest(
             url=url,
@@ -530,12 +746,51 @@ class PlaywrightEventLoopThread:
         self.request_queue.put(request)
         return future
     
+    def get_health_status(self) -> Dict:
+        """Get event loop health status"""
+        return self._health.get_status()
+    
+    def check_and_recover(self) -> bool:
+        """
+        Check event loop health and attempt recovery if needed
+        
+        Returns:
+            True if healthy or recovery successful, False if recovery failed
+        """
+        is_healthy, status = self._health.check_health()
+        
+        if not is_healthy:
+            self.logger.error(f"{_get_thread_info()} Event loop unhealthy: {status}")
+            _threading_metrics.record_event_loop_failure()
+            
+            if not self.thread or not self.thread.is_alive():
+                self.logger.warning(f"{_get_thread_info()} Event loop thread is dead, attempting restart...")
+                try:
+                    self.start()
+                    time.sleep(1.0)
+                    
+                    if self.thread and self.thread.is_alive():
+                        self.logger.info(f"{_get_thread_info()} Event loop thread restarted successfully")
+                        return True
+                    else:
+                        self.logger.error(f"{_get_thread_info()} Failed to restart event loop thread")
+                        return False
+                except Exception as e:
+                    self.logger.error(f"{_get_thread_info()} Error restarting event loop thread: {e}", exc_info=True)
+                    return False
+            
+            return False
+        
+        return True
+    
     def shutdown(self):
         """Shutdown the event loop thread"""
+        _log_thread_operation(self.logger, "Initiating event loop shutdown")
         self._shutdown = True
         self.request_queue.put(None)
         if self.thread:
             self.thread.join(timeout=5.0)
+            _log_thread_operation(self.logger, "Event loop thread joined")
 
 
 class PlaywrightPool:
@@ -555,15 +810,21 @@ class PlaywrightPool:
     
     async def initialize(self):
         """Initialize the Playwright instance"""
+        _log_thread_operation(self.logger, "Initializing Playwright pool")
+        
         if not PLAYWRIGHT_AVAILABLE:
             raise PermanentError(
                 "Playwright is not installed. Install it with: pip install playwright && playwright install chromium"
             )
         
         if self._playwright is None:
+            _log_thread_operation(self.logger, "Starting Playwright instance")
             self._playwright = await async_playwright().start()
+            _log_thread_operation(self.logger, "Playwright instance started", f"Instance ID: {id(self._playwright)}")
     
     async def get_instance(self) -> Optional[PlaywrightInstance]:
+        _log_thread_operation(self.logger, "Getting Playwright instance from pool")
+        
         async with self.lock:
             for instance in self.instances:
                 if instance.state == InstanceState.IDLE and instance.is_alive():
@@ -572,30 +833,41 @@ class PlaywrightPool:
                         instance.state = InstanceState.BUSY
                         instance.last_used = time.time()
                         self._total_warm_starts += 1
+                        _log_thread_operation(self.logger, "Using warm instance", f"PID: {instance.pid}, Memory: {mem:.1f}MB")
                         return instance
                     else:
-                        self.logger.info(f"Killing instance due to high memory: {mem:.1f}MB")
+                        self.logger.info(f"{_get_thread_info()} Killing instance due to high memory: {mem:.1f}MB")
                         await instance.kill()
                         self.instances.remove(instance)
+        
+        _log_thread_operation(self.logger, "No warm instances available")
         return None
     
     async def return_instance(self, instance: PlaywrightInstance, success: bool = True):
+        _log_thread_operation(self.logger, "Returning instance to pool", f"Success: {success}, PID: {instance.pid}")
+        
         async with self.lock:
             if not success:
                 instance.failures += 1
+                _log_thread_operation(self.logger, "Instance failure recorded", f"Total failures: {instance.failures}")
             
             mem = instance.get_memory_usage()
             if instance.failures >= 3 or mem >= self.MAX_MEMORY_MB or not instance.is_alive():
+                _log_thread_operation(self.logger, "Killing instance", f"Failures: {instance.failures}, Memory: {mem:.1f}MB, Alive: {instance.is_alive()}")
                 if instance in self.instances:
                     self.instances.remove(instance)
                 await instance.kill()
                 return
             
             instance.state = InstanceState.IDLE
+            _log_thread_operation(self.logger, "Instance returned to pool", f"PID: {instance.pid}")
     
     async def create_instance(self) -> PlaywrightInstance:
         startup_start = time.time()
         logger = self.logger
+        thread_id = threading.current_thread().ident
+        
+        _log_thread_operation(logger, "Creating new Playwright instance")
         
         try:
             if self._playwright is None:
@@ -616,12 +888,17 @@ class PlaywrightPool:
             ]
             
             if DEBUG_MODE:
-                logger.debug("Creating Playwright instance with verbose logging enabled")
+                logger.debug(f"{_get_thread_info()} Creating Playwright instance with verbose logging enabled")
             
+            _log_thread_operation(logger, "Launching Chromium browser")
             browser = await pw.chromium.launch(
                 headless=True,
                 args=launch_args
             )
+            _log_thread_operation(logger, "Chromium browser launched", f"Browser ID: {id(browser)}")
+            
+            _log_thread_operation(logger, "Creating browser context")
+            _threading_metrics.record_context_creation(thread_id)
             
             context = await browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
@@ -630,6 +907,7 @@ class PlaywrightPool:
                 bypass_csp=True,
                 ignore_https_errors=True
             )
+            _log_thread_operation(logger, "Browser context created", f"Context ID: {id(context)}")
             
             browser_process = browser._impl_obj._connection._transport._proc if hasattr(browser, '_impl_obj') else None
             pid = browser_process.pid if browser_process else None
@@ -655,9 +933,12 @@ class PlaywrightPool:
                 self._total_cold_starts += 1
                 self._total_startup_time += startup_time
             
-            logger.info(f"Created new Playwright instance (PID: {pid}, startup time: {startup_time:.2f}s)")
+            logger.info(f"{_get_thread_info()} Created new Playwright instance (PID: {pid}, startup time: {startup_time:.2f}s)")
             return instance
         except Exception as e:
+            logger.error(f"{_get_thread_info()} Failed to create Playwright instance: {e}", exc_info=True)
+            if 'greenlet' in str(e).lower():
+                _threading_metrics.record_greenlet_error()
             raise PermanentError(f"Failed to create Playwright instance: {e}", original_exception=e)
     
     async def cleanup_dead_instances(self):
@@ -825,6 +1106,9 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
         PlaywrightAnalysisTimeoutError: If overall analysis exceeds timeout (not retryable)
         PermanentError: If there's a permanent error (e.g., Playwright not installed)
     """
+    logger = get_logger()
+    _log_thread_operation(logger, f"run_analysis called for {url}")
+    
     if not PLAYWRIGHT_AVAILABLE:
         raise PermanentError(
             "Playwright is not installed. Install it with: pip install playwright && playwright install chromium"
@@ -832,7 +1116,6 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
     
     metrics = get_global_metrics()
     metrics.increment_total_operations()
-    logger = get_logger()
     cache_manager = get_cache_manager(enabled=not skip_cache)
     
     from tools.metrics.metrics_collector import get_metrics_collector
@@ -875,8 +1158,20 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
         
         try:
             event_loop_thread = _get_event_loop_thread()
+            
+            if not event_loop_thread.check_and_recover():
+                logger.warning(f"{_get_thread_info()} Event loop health check failed for {url}, retrying...")
+                was_retried = True
+                time.sleep(current_backoff)
+                current_backoff = min(current_backoff * 2, max_backoff)
+                continue
+            
+            _log_thread_operation(logger, f"Submitting analysis to event loop thread", f"URL: {url}, Attempt: {attempt}")
+            
             future = event_loop_thread.submit_analysis(url, timeout, force_retry)
             result = future.result(timeout=timeout)
+            
+            _log_thread_operation(logger, f"Analysis completed successfully", f"URL: {url}")
             
             metrics.record_success('run_analysis', was_retried=was_retried)
             metrics_collector.record_api_call_cypress()
@@ -932,6 +1227,31 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
             progressive_timeout.record_failure()
             
             is_retryable = not isinstance(e, PermanentError)
+            error_str = str(e).lower()
+            
+            if 'greenlet' in error_str or 'gr_frame' in error_str:
+                _threading_metrics.record_greenlet_error()
+                logger.error(
+                    f"{_get_thread_info()} Greenlet error detected in run_analysis",
+                    extra={
+                        'url': url,
+                        'attempt': attempt,
+                        'error': str(e)
+                    },
+                    exc_info=True
+                )
+            
+            if 'thread' in error_str and 'conflict' in error_str:
+                _threading_metrics.record_thread_conflict()
+                logger.error(
+                    f"{_get_thread_info()} Thread conflict detected in run_analysis",
+                    extra={
+                        'url': url,
+                        'attempt': attempt,
+                        'error': str(e)
+                    },
+                    exc_info=True
+                )
             
             metrics.record_error(
                 error_type=type(e).__name__,
@@ -943,7 +1263,7 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
             )
             
             logger.warning(
-                f"Retryable error for {url}, retrying (attempt {attempt})",
+                f"{_get_thread_info()} Retryable error for {url}, retrying (attempt {attempt})",
                 extra={
                     'url': url,
                     'attempt': attempt,
@@ -1301,11 +1621,16 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, po
     """
     circuit_breaker = _get_circuit_breaker()
     logger = get_logger()
+    thread_id = threading.current_thread().ident
+    
+    _log_thread_operation(logger, f"Starting analysis for {url}")
     
     from tools.metrics.metrics_collector import get_metrics_collector
     metrics_collector = get_metrics_collector()
     
     async def _execute_playwright():
+        _log_thread_operation(logger, "Executing Playwright analysis", f"URL: {url}")
+        
         instance = await pool.get_instance()
         warm_start = instance is not None and instance.warm_start
         
@@ -1313,9 +1638,9 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, po
         last_successful_step = None
         
         if warm_start:
-            logger.debug(f"Using warm Playwright instance for {url}")
+            logger.debug(f"{_get_thread_info()} Using warm Playwright instance for {url}")
         else:
-            logger.debug(f"Cold start Playwright instance for {url}")
+            logger.debug(f"{_get_thread_info()} Cold start Playwright instance for {url}")
             if instance is None:
                 instance = await pool.create_instance()
         
@@ -1325,7 +1650,11 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, po
         
         try:
             context = instance.context
+            _log_thread_operation(logger, "Creating new page", f"Context ID: {id(context)}")
+            _threading_metrics.record_page_creation(thread_id)
+            
             page = await context.new_page()
+            _log_thread_operation(logger, "Page created", f"Page ID: {id(page)}")
             
             await _setup_request_interception(page, instance)
             
@@ -1639,3 +1968,152 @@ def get_pool_stats() -> Dict:
         'avg_startup_time': 0.0,
         'instances': []
     }
+
+
+def get_event_loop_health() -> Dict:
+    """Get event loop health status"""
+    event_loop_thread = _get_event_loop_thread()
+    return event_loop_thread.get_health_status()
+
+
+def diagnose_threading_issues() -> Dict:
+    """
+    Comprehensive diagnostic report for threading issues
+    
+    Returns a dictionary with:
+    - Threading metrics (greenlet errors, thread conflicts, etc.)
+    - Event loop health status
+    - Pool statistics
+    - Active thread information
+    - Python/asyncio version info
+    """
+    logger = get_logger()
+    
+    main_thread = threading.main_thread()
+    current_thread = threading.current_thread()
+    all_threads = threading.enumerate()
+    
+    event_loop_thread = _get_event_loop_thread()
+    
+    try:
+        loop_info = None
+        if event_loop_thread.loop:
+            try:
+                loop_info = {
+                    'loop_id': id(event_loop_thread.loop),
+                    'is_running': event_loop_thread.loop.is_running(),
+                    'is_closed': event_loop_thread.loop.is_closed(),
+                }
+            except Exception as e:
+                loop_info = {'error': str(e)}
+    except Exception as e:
+        loop_info = {'error': str(e)}
+    
+    try:
+        asyncio_debug = asyncio.get_event_loop().get_debug()
+    except Exception:
+        asyncio_debug = None
+    
+    diagnosis = {
+        'python_version': sys.version,
+        'asyncio_debug': asyncio_debug,
+        'main_thread': {
+            'id': main_thread.ident,
+            'name': main_thread.name,
+            'is_alive': main_thread.is_alive()
+        },
+        'current_thread': {
+            'id': current_thread.ident,
+            'name': current_thread.name,
+            'is_alive': current_thread.is_alive(),
+            'is_main': current_thread == main_thread
+        },
+        'all_threads': [
+            {
+                'id': t.ident,
+                'name': t.name,
+                'daemon': t.daemon,
+                'is_alive': t.is_alive()
+            }
+            for t in all_threads
+        ],
+        'event_loop_thread': {
+            'exists': event_loop_thread is not None,
+            'thread_id': event_loop_thread.thread.ident if event_loop_thread.thread else None,
+            'thread_name': event_loop_thread.thread.name if event_loop_thread.thread else None,
+            'thread_is_alive': event_loop_thread.thread.is_alive() if event_loop_thread.thread else False,
+            'loop_info': loop_info
+        },
+        'threading_metrics': get_threading_metrics(),
+        'event_loop_health': get_event_loop_health(),
+        'pool_stats': get_pool_stats(),
+    }
+    
+    logger.info(f"{_get_thread_info()} Threading diagnostics generated")
+    
+    return diagnosis
+
+
+def print_threading_diagnostics():
+    """Print a formatted threading diagnostics report to stdout"""
+    import json
+    
+    diagnosis = diagnose_threading_issues()
+    
+    print("\n" + "="*80)
+    print("PLAYWRIGHT THREADING DIAGNOSTICS")
+    print("="*80)
+    
+    print(f"\nPython Version: {diagnosis['python_version']}")
+    print(f"Asyncio Debug: {diagnosis.get('asyncio_debug', 'N/A')}")
+    
+    print("\n--- Main Thread ---")
+    print(f"  ID: {diagnosis['main_thread']['id']}")
+    print(f"  Name: {diagnosis['main_thread']['name']}")
+    print(f"  Alive: {diagnosis['main_thread']['is_alive']}")
+    
+    print("\n--- Current Thread ---")
+    print(f"  ID: {diagnosis['current_thread']['id']}")
+    print(f"  Name: {diagnosis['current_thread']['name']}")
+    print(f"  Is Main: {diagnosis['current_thread']['is_main']}")
+    
+    print("\n--- All Threads ---")
+    for t in diagnosis['all_threads']:
+        print(f"  [{t['id']}] {t['name']} (daemon={t['daemon']}, alive={t['is_alive']})")
+    
+    print("\n--- Event Loop Thread ---")
+    elt = diagnosis['event_loop_thread']
+    print(f"  Exists: {elt['exists']}")
+    print(f"  Thread ID: {elt['thread_id']}")
+    print(f"  Thread Name: {elt['thread_name']}")
+    print(f"  Thread Alive: {elt['thread_is_alive']}")
+    if elt['loop_info']:
+        print(f"  Loop Info: {json.dumps(elt['loop_info'], indent=4)}")
+    
+    print("\n--- Threading Metrics ---")
+    metrics = diagnosis['threading_metrics']
+    print(f"  Greenlet Errors: {metrics['greenlet_errors']}")
+    print(f"  Thread Conflicts: {metrics['thread_conflicts']}")
+    print(f"  Event Loop Failures: {metrics['event_loop_failures']}")
+    print(f"  Context Creations by Thread: {metrics['context_creation_by_thread']}")
+    print(f"  Page Creations by Thread: {metrics['page_creation_by_thread']}")
+    print(f"  Async Operations by Thread: {metrics['async_operations_by_thread']}")
+    
+    print("\n--- Event Loop Health ---")
+    health = diagnosis['event_loop_health']
+    print(f"  Last Heartbeat: {health['last_heartbeat']}")
+    print(f"  Time Since Heartbeat: {health['time_since_heartbeat']}")
+    print(f"  Heartbeat Failures: {health['heartbeat_failures']}")
+    print(f"  Is Responsive: {health['is_responsive']}")
+    print(f"  Thread ID: {health['thread_id']}")
+    
+    print("\n--- Pool Stats ---")
+    pool = diagnosis['pool_stats']
+    print(f"  Total Instances: {pool['total_instances']}")
+    print(f"  Idle Instances: {pool['idle_instances']}")
+    print(f"  Busy Instances: {pool['busy_instances']}")
+    print(f"  Warm Starts: {pool['total_warm_starts']}")
+    print(f"  Cold Starts: {pool['total_cold_starts']}")
+    print(f"  Avg Startup Time: {pool['avg_startup_time']:.2f}s")
+    
+    print("\n" + "="*80 + "\n")

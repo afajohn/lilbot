@@ -123,6 +123,15 @@ python generate_report.py --export-json metrics.json
 python get_pool_stats.py
 # Export pool stats to JSON
 python get_pool_stats.py --json pool_stats.json
+
+# Diagnose threading issues
+python diagnose_playwright_threading.py
+# Export threading diagnostics to JSON
+python diagnose_playwright_threading.py --json threading_diagnostics.json
+# Show only specific diagnostics
+python diagnose_playwright_threading.py --metrics-only
+python diagnose_playwright_threading.py --health-only
+python diagnose_playwright_threading.py --pool-only
 ```
 
 **Build:** Not applicable (Python script)
@@ -196,6 +205,74 @@ All debug files are saved with format: `YYYYMMDD_HHMMSS_sanitized-url_reason.{pn
 - Screenshots: Full-page captures in PNG format
 - HTML: Complete page source at time of error
 - Organized in `debug_screenshots/` directory (gitignored)
+
+## Threading and Concurrency
+
+The system uses a dedicated event loop thread for all Playwright operations to ensure thread safety:
+
+### Threading Architecture
+- **Main Thread**: Handles application logic and submits analysis requests
+- **Event Loop Thread**: Dedicated thread running asyncio event loop for all Playwright operations
+- **Single-Thread Guarantee**: All browser contexts, pages, and async operations execute on the event loop thread
+- **Thread-Safe Queue**: Analysis requests are submitted via a thread-safe queue
+
+### Threading Diagnostics
+Comprehensive logging and debugging for threading issues:
+
+**Thread ID Logging**:
+- All Playwright operations log thread ID and thread name
+- Format: `[Thread-<ID>:<Name>]` prefix on all thread-related log messages
+- Tracks which thread creates browser contexts, pages, and runs async operations
+
+**Threading Metrics**:
+- `greenlet_errors`: Count of greenlet-related errors
+- `thread_conflicts`: Count of thread conflict errors
+- `event_loop_failures`: Count of event loop failures
+- `context_creation_by_thread`: Tracks browser context creation per thread ID
+- `page_creation_by_thread`: Tracks page creation per thread ID
+- `async_operations_by_thread`: Tracks async operations per thread ID
+
+**Event Loop Health Checks**:
+- Periodic heartbeat (every 5 seconds) to monitor event loop responsiveness
+- Tracks last heartbeat timestamp and failures
+- Automatic detection of unresponsive event loops (>30s since last heartbeat)
+- Health status includes: last heartbeat, time since heartbeat, failure count, responsive status
+
+**Error Detection**:
+- Automatic detection of greenlet errors (searches for "greenlet" or "gr_frame" in error messages)
+- Automatic detection of thread conflicts (searches for "thread" and "conflict" in error messages)
+- Full stack traces logged for all threading-related errors
+- Metrics automatically incremented when threading issues detected
+
+**Diagnostic Tools**:
+- `diagnose_threading_issues()`: Returns comprehensive threading diagnostic report
+- `print_threading_diagnostics()`: Prints formatted diagnostic report to stdout
+- `get_threading_metrics()`: Returns current threading metrics
+- `get_event_loop_health()`: Returns event loop health status
+- `reset_threading_metrics()`: Resets all threading metrics
+
+**Diagnostic Script**:
+```bash
+# Full diagnostics report
+python diagnose_playwright_threading.py
+
+# Export to JSON for analysis
+python diagnose_playwright_threading.py --json diagnostics.json
+
+# View specific components
+python diagnose_playwright_threading.py --metrics-only
+python diagnose_playwright_threading.py --health-only
+python diagnose_playwright_threading.py --pool-only
+```
+
+The diagnostic report includes:
+- Python version and asyncio configuration
+- Main thread information (ID, name, status)
+- All active threads (ID, name, daemon status, alive status)
+- Event loop thread details (ID, name, loop status)
+- Threading metrics (errors, conflicts, operations by thread)
+- Event loop health (heartbeat status, responsiveness)
+- Pool statistics (instances, warm/cold starts)
 
 ## Performance Optimizations
 
