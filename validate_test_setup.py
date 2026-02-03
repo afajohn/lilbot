@@ -73,7 +73,6 @@ def main():
     test_files = [
         ('tests/conftest.py', 'Test fixtures'),
         ('tests/unit/test_sheets_client.py', 'Sheets client tests'),
-        ('tests/unit/test_cypress_runner.py', 'Cypress runner tests'),
         ('tests/unit/test_logger.py', 'Logger tests'),
         ('tests/integration/test_run_audit.py', 'Run audit tests'),
         ('tests/integration/test_end_to_end.py', 'End-to-end tests'),
