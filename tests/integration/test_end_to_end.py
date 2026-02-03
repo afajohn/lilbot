@@ -8,14 +8,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 import run_audit
 from sheets import sheets_client
-from qa import cypress_runner
+from qa import playwright_runner
 
 
 @pytest.mark.integration
 class TestEndToEndScenarios:
     @patch('sheets.sheets_client.authenticate')
     @patch('sheets.sheets_client.read_urls')
-    @patch('qa.cypress_runner.run_analysis')
+    @patch('qa.playwright_runner.run_analysis')
     @patch('sheets.sheets_client.batch_write_psi_urls')
     def test_full_audit_workflow_passing(self, mock_batch_write, mock_run_analysis, mock_read_urls, mock_auth):
         mock_service = Mock()
@@ -59,7 +59,7 @@ class TestEndToEndScenarios:
     
     @patch('sheets.sheets_client.authenticate')
     @patch('sheets.sheets_client.read_urls')
-    @patch('qa.cypress_runner.run_analysis')
+    @patch('qa.playwright_runner.run_analysis')
     @patch('sheets.sheets_client.batch_write_psi_urls')
     def test_full_audit_workflow_failing(self, mock_batch_write, mock_run_analysis, mock_read_urls, mock_auth):
         mock_service = Mock()
@@ -102,7 +102,7 @@ class TestEndToEndScenarios:
     
     @patch('sheets.sheets_client.authenticate')
     @patch('sheets.sheets_client.read_urls')
-    @patch('qa.cypress_runner.run_analysis')
+    @patch('qa.playwright_runner.run_analysis')
     @patch('sheets.sheets_client.batch_write_psi_urls')
     def test_mixed_results_workflow(self, mock_batch_write, mock_run_analysis, mock_read_urls, mock_auth):
         mock_service = Mock()
@@ -167,7 +167,7 @@ class TestEndToEndScenarios:
     
     @patch('sheets.sheets_client.authenticate')
     @patch('sheets.sheets_client.read_urls')
-    @patch('qa.cypress_runner.run_analysis')
+    @patch('qa.playwright_runner.run_analysis')
     def test_partial_existing_data_workflow(self, mock_run_analysis, mock_read_urls, mock_auth):
         mock_service = Mock()
         mock_auth.return_value = mock_service
@@ -246,7 +246,7 @@ class TestEndToEndScenarios:
     
     @patch('sheets.sheets_client.authenticate')
     @patch('sheets.sheets_client.read_urls')
-    @patch('qa.cypress_runner.run_analysis')
+    @patch('qa.playwright_runner.run_analysis')
     def test_error_handling_workflow(self, mock_run_analysis, mock_read_urls, mock_auth):
         mock_service = Mock()
         mock_auth.return_value = mock_service
@@ -264,8 +264,8 @@ class TestEndToEndScenarios:
                 'mobile_psi_url': None,
                 'desktop_psi_url': None
             },
-            cypress_runner.CypressTimeoutError("Timeout after 600s"),
-            cypress_runner.CypressRunnerError("Cypress failed"),
+            playwright_runner.PlaywrightTimeoutError("Timeout after 600s"),
+            playwright_runner.PlaywrightRunnerError("Playwright failed"),
         ]
         
         processed_count = {'count': 0, 'lock': threading.Lock()}
@@ -287,7 +287,7 @@ class TestEndToEndScenarios:
         assert 'error' in results[1]
         assert 'Timeout' in results[1]['error']
         assert 'error' in results[2]
-        assert 'Cypress failed' in results[2]['error']
+        assert 'Playwright failed' in results[2]['error']
     
     @patch('sheets.sheets_client.authenticate')
     @patch('time.sleep')
@@ -320,7 +320,7 @@ class TestEndToEndScenarios:
 class TestConcurrentExecution:
     @patch('sheets.sheets_client.authenticate')
     @patch('sheets.sheets_client.read_urls')
-    @patch('qa.cypress_runner.run_analysis')
+    @patch('qa.playwright_runner.run_analysis')
     @patch('sheets.sheets_client.batch_write_psi_urls')
     def test_concurrent_url_processing(self, mock_batch_write, mock_run_analysis, mock_read_urls, mock_auth):
         from concurrent.futures import ThreadPoolExecutor

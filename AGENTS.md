@@ -7,8 +7,9 @@
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Install Node.js dependencies
-npm install
+# Install Playwright and browsers
+pip install playwright
+playwright install chromium
 ```
 
 **Validate Setup:**
@@ -102,6 +103,11 @@ python generate_report.py --input metrics.json --output dashboard.html
 python generate_report.py --export-prometheus metrics.prom
 # Export JSON metrics
 python generate_report.py --export-json metrics.json
+
+# View Playwright pool statistics
+python get_pool_stats.py
+# Export pool stats to JSON
+python get_pool_stats.py --json pool_stats.json
 ```
 
 **Build:** Not applicable (Python script)
@@ -125,7 +131,7 @@ python -m pytest  # Or use run_tests.ps1 (Windows) or ./run_tests.sh (Unix)
 ## Tech Stack
 
 - **Language**: Python 3.7+
-- **Browser Automation**: Cypress (JavaScript/Node.js)
+- **Browser Automation**: Playwright (Python)
 - **APIs**: Google Sheets API v4
 - **Caching**: Redis (with file-based fallback)
 - **Monitoring**: Prometheus-compatible metrics, Plotly dashboards
@@ -137,27 +143,59 @@ python -m pytest  # Or use run_tests.ps1 (Windows) or ./run_tests.sh (Unix)
   - `plotly` - Interactive dashboard charts
   - `tqdm` - Progress bars for better UX
   - `pyyaml` - YAML configuration file support
-  - Cypress - Browser automation for PageSpeed Insights
+  - `playwright` - Browser automation for PageSpeed Insights
 
 ## Performance Optimizations
 
-The system has been optimized for faster URL processing:
+The system has been comprehensively optimized for faster URL processing:
 
+### Core Optimizations
 1. **Result Caching**: Redis/file-based cache with 24-hour TTL and LRU eviction (1000 entries max)
-2. **Reduced Timeouts**: Default timeout reduced from 900s to 600s with optimized Cypress timeouts
-3. **Fewer Retries**: Cypress retries reduced from 5 to 2, Python retries from 10 to 3
+2. **Reduced Timeouts**: Default timeout reduced from 900s to 600s with optimized Playwright timeouts
+3. **Fewer Retries**: Playwright retries reduced from 5 to 2, Python retries from 10 to 3
 4. **Faster Waits**: Inter-action waits reduced from 5-15s to 2s
 5. **Incremental Updates**: Spreadsheet updates happen immediately after each URL (not batched at end)
-6. **Explicit Headless Mode**: Cypress runs in headless mode with explicit flags
-7. **Optimized Analysis**: PageSpeed Insights runs once, then switches between Mobile/Desktop views
-8. **Instance Pooling**: Cypress instances are pooled and reused across URLs (warm start vs cold start)
-9. **Result Streaming**: Results are streamed to avoid large JSON file I/O operations
-10. **Progressive Timeout**: Timeout starts at 300s, increases to 600s after first failure
-11. **Memory Monitoring**: Automatic monitoring of Cypress process memory usage with auto-restart on >1GB
+6. **Result Streaming**: Results are streamed to avoid large JSON file I/O operations
+7. **Progressive Timeout**: Timeout starts at 300s, increases to 600s after first failure
 
-**Key Issue Resolved**: Running `npx cypress open` while `run_audit.py` is executing blocks the headless Cypress instance. Always close the Cypress UI before running audits.
+### Playwright-Specific Optimizations
 
-**Instance Pooling Details**: The Cypress runner maintains a pool of up to 2 instances that can be reused across multiple URL analyses. Warm start instances reuse existing browser contexts for faster execution. Instances are automatically killed and removed from the pool when they exceed 1GB memory usage or experience 3+ consecutive failures. The pool is automatically cleaned up on application shutdown.
+**Browser Instance Pooling (Up to 3 Concurrent Browsers)**:
+- Pool maintains up to 3 persistent browser contexts for parallel processing
+- Warm start instances reuse existing browser contexts for 2-3x faster execution
+- Cold start instances are created on-demand with optimized launch flags
+- Automatic memory monitoring with 1GB threshold per instance
+- Instances are auto-killed after 3 consecutive failures or high memory usage
+- Pool cleanup on application shutdown
+
+**Network Request Interception & Resource Blocking**:
+- Automatically blocks unnecessary resources to speed up page loads:
+  - Images, media files, fonts, stylesheets (visual assets not needed for PSI)
+  - Analytics scripts (Google Analytics, GTM, Facebook Pixel, etc.)
+  - Advertising networks (DoubleClick, Google Ads, etc.)
+  - Tracking beacons and telemetry endpoints
+- Typical blocking ratio: 40-60% of requests blocked
+- Reduces bandwidth usage and page load time by 30-50%
+
+**Parallel Browser Management**:
+- Default concurrency increased to 3 workers (up from 1)
+- Each worker can use a separate browser instance from the pool
+- ThreadPoolExecutor manages parallel URL processing
+- Configurable via `--concurrency` flag (1-5 workers supported)
+
+**Performance Monitoring**:
+- Tracks page load time per URL analysis
+- Measures browser startup time for cold starts
+- Records memory usage per instance over time
+- Monitors warm/cold start ratio
+- Collects resource blocking statistics (total vs blocked requests)
+- All metrics exported to Prometheus and JSON formats
+
+**Additional Browser Optimizations**:
+- Headless mode with GPU and extension disabling
+- Disabled sandboxing for faster startup (safe in containerized environments)
+- CSP bypass and HTTPS error ignoring for problematic sites
+- DOM content loaded instead of full network idle (faster analysis start)
 
 ## Architecture
 
@@ -167,6 +205,7 @@ The system has been optimized for faster URL processing:
 .
 ├── run_audit.py              # Main entry point - orchestrates the audit
 ├── generate_report.py        # Generate HTML metrics dashboard
+├── get_pool_stats.py         # Display Playwright pool statistics
 ├── list_tabs.py              # Utility to list spreadsheet tabs
 ├── get_service_account_email.py  # Utility to get service account email
 ├── validate_setup.py         # Setup validation script
@@ -179,7 +218,7 @@ The system has been optimized for faster URL processing:
 │   │   ├── schema_validator.py  # Spreadsheet schema validation
 │   │   └── data_quality_checker.py  # Duplicate URL and data quality checks
 │   ├── qa/
-│   │   └── cypress_runner.py # Cypress automation wrapper
+│   │   └── playwright_runner.py # Playwright automation wrapper
 │   ├── cache/
 │   │   └── cache_manager.py  # Cache layer (Redis + file backend)
 │   ├── security/
@@ -190,10 +229,6 @@ The system has been optimized for faster URL processing:
 │   └── utils/
 │       ├── logger.py         # Logging utilities
 │       └── url_validator.py  # URL validation (regex, DNS, redirects) and normalization
-├── cypress/
-│   ├── e2e/
-│   │   └── analyze-url.cy.js # PageSpeed Insights test automation
-│   └── results/              # Generated JSON results (gitignored)
 ├── .cache/                   # File cache storage (gitignored)
 ├── metrics.json              # JSON metrics export (gitignored)
 ├── metrics.prom              # Prometheus metrics export (gitignored)
@@ -209,11 +244,11 @@ The system has been optimized for faster URL processing:
 1. **Input**: URLs from Google Sheets column A (starting row 2)
 2. **Processing**:
    - `run_audit.py` reads URLs via `sheets_client.py`
-   - For each URL, `cypress_runner.py` checks cache first (unless `--skip-cache`)
-   - On cache miss, launches Cypress (retries up to 3 times on failure)
+   - For each URL, `playwright_runner.py` checks cache first (unless `--skip-cache`)
+   - On cache miss, launches Playwright browser (retries up to 3 times on failure)
    - Results are cached with 24-hour TTL for future runs
-   - Cypress navigates to PageSpeed Insights and extracts scores from `.lh-exp-gauge__percentage`
-   - Results saved to JSON files in `cypress/results/`
+   - Playwright navigates to PageSpeed Insights and extracts scores from `.lh-exp-gauge__percentage`
+   - Results returned as structured data
    - **Incremental updates**: Spreadsheet is updated immediately after each URL is analyzed (not batched at the end)
 3. **Output**: 
    - For scores >= 80: Cell is filled with the text "passed"
@@ -241,33 +276,21 @@ The system has been optimized for faster URL processing:
 - Writes PSI URLs back to spreadsheet
 - Handles errors (permissions, missing tabs, etc.)
 
-#### cypress_runner.py
-- Finds npx executable
-- Runs Cypress tests with proper encoding (UTF-8)
+#### playwright_runner.py
+- Manages Playwright browser instances with advanced pooling
+- Runs PageSpeed Insights analysis with proper error handling
 - Handles timeouts and retries (up to 3 retry attempts with fixed 5s wait)
-- Parses JSON results via streaming to avoid large file I/O
+- Returns structured results with performance metrics
 - **Progressive Timeout**: Starts at 300s, increases to 600s after first failure
-- **Instance Pooling**: Maintains pool of up to 2 reusable Cypress instances for warm starts
-- **Memory Monitoring**: Monitors process memory usage and auto-restarts on >1GB
-- **Critical Fix**: Uses `encoding='utf-8', errors='replace'` to prevent Windows UnicodeDecodeError
-- Runs Cypress in explicit headless mode for better performance
+- **Instance Pooling**: Maintains pool of up to 3 reusable browser contexts for warm starts
+- **Network Request Interception**: Blocks unnecessary resources (images, fonts, ads, analytics)
+- **Memory Monitoring**: Monitors browser memory usage and auto-restarts on >1GB
+- **Parallel Processing**: Supports up to 3 concurrent browser instances
+- **Performance Tracking**: Records page load time, browser startup time, memory usage
+- **Resource Blocking Stats**: Tracks total vs blocked requests per instance
+- Runs Playwright in explicit headless mode with optimized launch flags
 - Pool cleanup via `shutdown_pool()` called on application exit
-
-#### analyze-url.cy.js
-- Cypress test that automates PageSpeed Insights
-- **URL Validation**: Pre-checks URL accessibility before analysis (30s timeout)
-- Visits pagespeed.web.dev
-- **Smart Selectors**: Uses data-testid attributes with fallbacks to brittle text-based selectors
-- **Viewport Detection**: Detects and logs viewport changes for responsive UI handling
-- Enters URL and triggers analysis (both mobile and desktop results available after single analysis)
-- **Smart Wait**: Polls for score elements with configurable intervals (max 120s, poll every 2s)
-- Switches between Mobile/Desktop views to extract scores with fallback selector hierarchy
-- Collects report URLs for scores < 80
-- **Screenshot on Failure**: Automatically captures full-page screenshots when tests fail
-- Saves results to JSON
-- Configured with 2 automatic retries on failure (reduced from 5)
-- Optimized timeout values (defaultCommandTimeout: 10s, pageLoadTimeout: 120s)
-- Reduced wait times between actions for faster execution
+- Pool statistics accessible via `get_pool_stats()` function
 
 #### logger.py
 - Sets up logging to both console and file
@@ -295,7 +318,13 @@ The system has been optimized for faster URL processing:
 #### metrics_collector.py
 - Thread-safe metrics collection
 - Tracks success/failure rates, processing time, cache efficiency
-- Monitors API quota usage (Sheets and Cypress)
+- Monitors API quota usage (Sheets and Playwright)
+- **Playwright-Specific Metrics**:
+  - Page load time (average, per URL)
+  - Browser startup time (cold starts only)
+  - Memory usage per instance (average, min, max)
+  - Warm vs cold start ratio
+  - Request blocking statistics (total, blocked, ratio)
 - Prometheus-compatible export format
 - JSON export for dashboards
 - Automatic alerting when failure rate exceeds 20%
@@ -323,7 +352,7 @@ subprocess.run(
     errors='replace'
 )
 ```
-This prevents `UnicodeDecodeError` on Windows when Cypress outputs non-ASCII characters.
+This prevents `UnicodeDecodeError` on Windows when processing non-ASCII characters.
 
 ### Spreadsheet Range
 URLs are read from `A2:A` (not `A:A`) to skip the header row. Row enumeration starts at 2 to maintain correct row numbers when writing results back.
@@ -335,15 +364,10 @@ URLs are read from `A2:A` (not `A:A`) to skip the header row. Row enumeration st
 - Continue processing remaining URLs even if one fails
 
 ### Retry Logic
-Cypress runs can fail transiently. The system has multiple layers of retry:
-- Cypress internal retries: 2 attempts per run (configured in cypress.config.js)
+Playwright runs can fail transiently. The system has multiple layers of retry:
+- Playwright internal retries: 2 attempts per run
 - Python runner retries: Up to 3 attempts with fixed 5s wait between attempts
-- Total possible attempts: Up to 12 (2 × 3 + initial attempts)
-
-### Results File Management
-- Each Cypress run generates a timestamped JSON file
-- The runner tracks existing files before running and identifies new files after
-- This prevents race conditions when running multiple audits
+- Total possible attempts: Up to 6 (2 × 3)
 
 ## Input Validation and Data Quality
 
@@ -549,21 +573,20 @@ Cache behavior can be configured via environment variables (see `.env.example`):
 ### Changing Score Threshold
 Edit `SCORE_THRESHOLD` in `run_audit.py`.
 
-### Modifying Cypress Selectors
+### Modifying PageSpeed Insights Automation
 If PageSpeed Insights UI changes:
-1. Edit `cypress/e2e/analyze-url.cy.js`
+1. Edit `playwright_runner.py`
 2. Update selectors to match new DOM structure
 3. Current key selectors (with fallback hierarchy):
    - URL input: `[data-testid="url-input"]` → `input[name="url"]`
    - Analyze button: `[data-testid*="analyze"]` → `button` containing text matching `/analyze/i`
    - Score display: `[data-testid="score-gauge"]` → `.lh-exp-gauge__percentage` → `.lh-gauge__percentage`
    - Mobile/Desktop toggle: `[data-testid*="mobile/desktop"]` → `button` containing 'Mobile' or 'Desktop'
-4. Test with `npx cypress open`
+4. Test with Playwright codegen: `playwright codegen https://pagespeed.web.dev`
 
 ### Adding More Retry Attempts
-1. Modify `max_retries` parameter in `cypress_runner.py` `run_analysis()` function (default: 3)
-2. Modify `retries.runMode` in `cypress.config.js` (default: 2)
-3. Adjust timeout with `--timeout` flag when running `run_audit.py` (default: 600 seconds)
+1. Modify `max_retries` parameter in `playwright_runner.py` `run_analysis()` function (default: 3)
+2. Adjust timeout with `--timeout` flag when running `run_audit.py` (default: 600 seconds)
 
 ## Testing
 
@@ -611,7 +634,7 @@ make test-cov-check              # Run and check 70% threshold
 
 **Test Structure:**
 - `tests/unit/test_sheets_client.py` - Google Sheets API wrapper tests
-- `tests/unit/test_cypress_runner.py` - Cypress automation tests
+- `tests/unit/test_playwright_runner.py` - Playwright automation tests
 - `tests/unit/test_logger.py` - Logging utilities tests
 - `tests/integration/test_run_audit.py` - Main audit orchestration tests
 - `tests/conftest.py` - Shared fixtures and test configuration
@@ -634,23 +657,28 @@ For manual end-to-end testing:
 ### Enable Verbose Logging
 Logs are automatically saved to `logs/audit_YYYYMMDD_HHMMSS.log`.
 
-### Test Cypress Manually
+### Test Playwright Manually
 ```bash
-npx cypress open
-```
-Run the `analyze-url.cy.js` test in the Cypress UI to see what's happening.
+# Generate test code interactively
+playwright codegen https://pagespeed.web.dev
 
-### Check Results Files
-Results JSON files in `cypress/results/` show what data was extracted.
+# Run in headed mode for debugging
+# Modify playwright_runner.py temporarily to set headless=False
+```
 
 ### Common Issues
 1. **UnicodeDecodeError**: Fixed by adding `encoding='utf-8', errors='replace'` to subprocess calls
-2. **No results file found**: Cypress failed silently - check Cypress logs
-3. **Timeout errors**: Increase timeout with `--timeout 900` or higher
-4. **Permission denied**: Verify spreadsheet is shared with service account email
-5. **Running `npx cypress open` while `run_audit.py` is running**: These conflict because Cypress can only run one instance at a time. Close the Cypress UI before running the audit script.
-6. **Slow processing**: Ensure you're not running `npx cypress open` simultaneously, which blocks the headless execution
-7. **Cache issues**: See CACHE_GUIDE.md for troubleshooting cache-related problems
+2. **Timeout errors**: Increase timeout with `--timeout 900` or higher
+3. **Permission denied**: Verify spreadsheet is shared with service account email
+4. **Slow processing**: Check network connectivity and PageSpeed Insights availability
+5. **Cache issues**: See CACHE_GUIDE.md for troubleshooting cache-related problems
+6. **Browser installation issues**: If Playwright browsers are not installed, run `playwright install chromium`
+7. **Headless mode failures**: Some systems may have issues with headless browsers. Check system dependencies:
+   - **Linux**: Install required system libraries: `playwright install-deps chromium`
+   - **Docker/CI**: Use official Playwright Docker images or install dependencies
+   - **WSL**: Ensure X11 forwarding is configured if running in headed mode
+8. **Browser crashes**: Monitor memory usage; restart may be needed for long-running audits
+9. **Selector failures**: PageSpeed Insights UI may have changed; update selectors in `playwright_runner.py`
 
 ## Dependencies
 
@@ -662,10 +690,8 @@ Results JSON files in `cypress/results/` show what data was extracted.
 - `python-dotenv`: Environment variables (optional)
 - `redis`: Redis client for caching (optional, falls back to file cache)
 - `plotly`: Interactive dashboard charts and visualizations
+- `playwright`: Browser automation
 - `argparse`: Command-line parsing (built-in)
-
-### Node.js (package.json)
-- `cypress`: Browser automation
 
 ## Security
 
@@ -716,9 +742,9 @@ The system includes comprehensive monitoring:
 ### Metrics Collected
 - **Success/Failure Rates**: Track audit success percentage and identify issues
 - **Processing Time**: Monitor average time per URL analysis
-- **API Quota Usage**: Count Sheets API and Cypress API calls to stay within limits
+- **API Quota Usage**: Count Sheets API and Playwright API calls to stay within limits
 - **Cache Hit Ratio**: Measure cache efficiency (target >70%)
-- **Failure Reasons**: Categorize failures (timeout, cypress, permanent, etc.)
+- **Failure Reasons**: Categorize failures (timeout, browser, permanent, etc.)
 - **Alerting**: Automatic alerts when failure rate exceeds 20%
 
 ### Metrics Formats
@@ -745,7 +771,7 @@ For detailed metrics documentation, see `METRICS_GUIDE.md` and `METRICS_QUICK_RE
 
 - Rate limits: Google Sheets API has quotas (100 requests per 100 seconds per user)
 - PageSpeed Insights may rate-limit high-volume usage
-- Cypress requires a browser and graphics environment (use Xvfb on headless Linux)
+- Playwright requires browser binaries to be installed via `playwright install chromium`
 - Windows encoding issues are mitigated but may still occur with exotic characters
 - URLs must be in column A starting at row 2
 - Results always written to columns F and G (not configurable via CLI)

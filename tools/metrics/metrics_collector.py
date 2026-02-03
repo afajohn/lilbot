@@ -9,7 +9,8 @@ import json
 class MetricsCollector:
     """
     Collects and exports metrics in Prometheus-compatible format.
-    Tracks success/failure rates, processing time, API quota usage, and cache hit ratio.
+    Tracks success/failure rates, processing time, API quota usage, cache hit ratio,
+    and Playwright-specific metrics (page load time, browser startup time, memory per instance).
     """
     
     def __init__(self):
@@ -35,6 +36,15 @@ class MetricsCollector:
         
         self._alert_triggered = False
         self._alert_threshold = 0.20
+        
+        self._playwright_page_load_times: List[float] = []
+        self._playwright_browser_startup_times: List[float] = []
+        self._playwright_memory_usage: List[float] = []
+        self._playwright_warm_starts = 0
+        self._playwright_cold_starts = 0
+        self._playwright_total_requests = 0
+        self._playwright_blocked_requests = 0
+        self._playwright_blocked_by_type: Dict[str, int] = defaultdict(int)
         
     def record_url_start(self):
         """Record start of URL processing"""
@@ -118,6 +128,47 @@ class MetricsCollector:
         with self._lock:
             self._api_calls_cypress += count
     
+    def record_playwright_metrics(
+        self,
+        page_load_time: float,
+        browser_startup_time: float,
+        memory_mb: float,
+        warm_start: bool,
+        blocked_requests: int = 0,
+        total_requests: int = 0
+    ):
+        """
+        Record Playwright-specific performance metrics.
+        
+        Args:
+            page_load_time: Time taken to load and analyze the page (seconds)
+            browser_startup_time: Time taken to start the browser (seconds, 0 for warm starts)
+            memory_mb: Current memory usage of the browser instance (MB)
+            warm_start: Whether this was a warm start (reused instance)
+            blocked_requests: Number of requests blocked by resource interception
+            total_requests: Total number of requests made
+        """
+        with self._lock:
+            self._playwright_page_load_times.append(page_load_time)
+            if browser_startup_time > 0:
+                self._playwright_browser_startup_times.append(browser_startup_time)
+            self._playwright_memory_usage.append(memory_mb)
+            
+            if warm_start:
+                self._playwright_warm_starts += 1
+            else:
+                self._playwright_cold_starts += 1
+            
+            self._playwright_total_requests += total_requests
+            self._playwright_blocked_requests += blocked_requests
+            
+            if len(self._playwright_page_load_times) > 10000:
+                self._playwright_page_load_times = self._playwright_page_load_times[-10000:]
+            if len(self._playwright_browser_startup_times) > 10000:
+                self._playwright_browser_startup_times = self._playwright_browser_startup_times[-10000:]
+            if len(self._playwright_memory_usage) > 10000:
+                self._playwright_memory_usage = self._playwright_memory_usage[-10000:]
+    
     def _check_failure_rate(self):
         """Check if failure rate exceeds alert threshold"""
         analyzed = self._successful_urls + self._failed_urls
@@ -170,6 +221,42 @@ class MetricsCollector:
                 if self._processing_times else 0.0
             )
             
+            avg_page_load_time = (
+                sum(self._playwright_page_load_times) / len(self._playwright_page_load_times)
+                if self._playwright_page_load_times else 0.0
+            )
+            
+            avg_browser_startup_time = (
+                sum(self._playwright_browser_startup_times) / len(self._playwright_browser_startup_times)
+                if self._playwright_browser_startup_times else 0.0
+            )
+            
+            avg_memory_usage = (
+                sum(self._playwright_memory_usage) / len(self._playwright_memory_usage)
+                if self._playwright_memory_usage else 0.0
+            )
+            
+            max_memory_usage = (
+                max(self._playwright_memory_usage)
+                if self._playwright_memory_usage else 0.0
+            )
+            
+            min_memory_usage = (
+                min(self._playwright_memory_usage)
+                if self._playwright_memory_usage else 0.0
+            )
+            
+            total_starts = self._playwright_warm_starts + self._playwright_cold_starts
+            warm_start_ratio = (
+                self._playwright_warm_starts / total_starts * 100
+                if total_starts > 0 else 0.0
+            )
+            
+            blocking_ratio = (
+                self._playwright_blocked_requests / self._playwright_total_requests * 100
+                if self._playwright_total_requests > 0 else 0.0
+            )
+            
             return {
                 'uptime_seconds': elapsed_time,
                 'total_urls': self._total_urls,
@@ -187,7 +274,22 @@ class MetricsCollector:
                 'total_api_calls': self._api_calls_sheets + self._api_calls_cypress,
                 'avg_processing_time_seconds': avg_processing_time,
                 'failure_reasons': dict(self._failure_reasons),
-                'alert_triggered': self._alert_triggered
+                'alert_triggered': self._alert_triggered,
+                'playwright': {
+                    'avg_page_load_time_seconds': avg_page_load_time,
+                    'avg_browser_startup_time_seconds': avg_browser_startup_time,
+                    'avg_memory_usage_mb': avg_memory_usage,
+                    'max_memory_usage_mb': max_memory_usage,
+                    'min_memory_usage_mb': min_memory_usage,
+                    'warm_starts': self._playwright_warm_starts,
+                    'cold_starts': self._playwright_cold_starts,
+                    'total_starts': total_starts,
+                    'warm_start_ratio_percent': warm_start_ratio,
+                    'total_requests': self._playwright_total_requests,
+                    'blocked_requests': self._playwright_blocked_requests,
+                    'blocking_ratio_percent': blocking_ratio,
+                    'total_page_loads': len(self._playwright_page_load_times)
+                }
             }
     
     def export_prometheus(self) -> str:
@@ -250,6 +352,46 @@ class MetricsCollector:
         lines.append(f"psi_audit_alert_active {1 if metrics['alert_triggered'] else 0}")
         lines.append("")
         
+        pw = metrics['playwright']
+        lines.append("# HELP psi_audit_playwright_page_load_time_seconds Average page load time")
+        lines.append("# TYPE psi_audit_playwright_page_load_time_seconds gauge")
+        lines.append(f"psi_audit_playwright_page_load_time_seconds {pw['avg_page_load_time_seconds']:.2f}")
+        lines.append("")
+        
+        lines.append("# HELP psi_audit_playwright_browser_startup_time_seconds Average browser startup time")
+        lines.append("# TYPE psi_audit_playwright_browser_startup_time_seconds gauge")
+        lines.append(f"psi_audit_playwright_browser_startup_time_seconds {pw['avg_browser_startup_time_seconds']:.2f}")
+        lines.append("")
+        
+        lines.append("# HELP psi_audit_playwright_memory_usage_mb Browser memory usage statistics")
+        lines.append("# TYPE psi_audit_playwright_memory_usage_mb gauge")
+        lines.append(f"psi_audit_playwright_memory_usage_mb{{stat=\"avg\"}} {pw['avg_memory_usage_mb']:.2f}")
+        lines.append(f"psi_audit_playwright_memory_usage_mb{{stat=\"max\"}} {pw['max_memory_usage_mb']:.2f}")
+        lines.append(f"psi_audit_playwright_memory_usage_mb{{stat=\"min\"}} {pw['min_memory_usage_mb']:.2f}")
+        lines.append("")
+        
+        lines.append("# HELP psi_audit_playwright_starts Browser instance starts")
+        lines.append("# TYPE psi_audit_playwright_starts counter")
+        lines.append(f"psi_audit_playwright_starts{{type=\"warm\"}} {pw['warm_starts']}")
+        lines.append(f"psi_audit_playwright_starts{{type=\"cold\"}} {pw['cold_starts']}")
+        lines.append("")
+        
+        lines.append("# HELP psi_audit_playwright_warm_start_ratio Warm start ratio percentage")
+        lines.append("# TYPE psi_audit_playwright_warm_start_ratio gauge")
+        lines.append(f"psi_audit_playwright_warm_start_ratio {pw['warm_start_ratio_percent']:.2f}")
+        lines.append("")
+        
+        lines.append("# HELP psi_audit_playwright_requests HTTP requests")
+        lines.append("# TYPE psi_audit_playwright_requests counter")
+        lines.append(f"psi_audit_playwright_requests{{status=\"total\"}} {pw['total_requests']}")
+        lines.append(f"psi_audit_playwright_requests{{status=\"blocked\"}} {pw['blocked_requests']}")
+        lines.append("")
+        
+        lines.append("# HELP psi_audit_playwright_blocking_ratio Request blocking ratio percentage")
+        lines.append("# TYPE psi_audit_playwright_blocking_ratio gauge")
+        lines.append(f"psi_audit_playwright_blocking_ratio {pw['blocking_ratio_percent']:.2f}")
+        lines.append("")
+        
         for reason, count in metrics['failure_reasons'].items():
             lines.append(f"psi_audit_failures_by_reason{{reason=\"{reason}\"}} {count}")
         
@@ -298,6 +440,14 @@ class MetricsCollector:
             self._failure_reasons.clear()
             self._url_results.clear()
             self._alert_triggered = False
+            self._playwright_page_load_times.clear()
+            self._playwright_browser_startup_times.clear()
+            self._playwright_memory_usage.clear()
+            self._playwright_warm_starts = 0
+            self._playwright_cold_starts = 0
+            self._playwright_total_requests = 0
+            self._playwright_blocked_requests = 0
+            self._playwright_blocked_by_type.clear()
 
 
 _global_metrics_collector = None

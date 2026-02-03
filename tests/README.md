@@ -8,11 +8,13 @@ This directory contains comprehensive tests for the PageSpeed Insights Audit Too
 tests/
 ├── conftest.py              # Pytest fixtures and shared test configuration
 ├── unit/                    # Unit tests for individual components
-│   ├── test_sheets_client.py    # Tests for Google Sheets API wrapper
-│   ├── test_cypress_runner.py   # Tests for Cypress automation wrapper
-│   └── test_logger.py           # Tests for logging utilities
+│   ├── test_sheets_client.py      # Tests for Google Sheets API wrapper
+│   ├── test_playwright_runner.py  # Tests for Playwright automation wrapper
+│   ├── test_logger.py             # Tests for logging utilities
+│   └── test_security.py           # Tests for security features
 └── integration/             # Integration tests
-    └── test_run_audit.py        # Tests for main audit orchestration
+    ├── test_run_audit.py          # Tests for main audit orchestration
+    └── test_end_to_end.py         # End-to-end integration tests
 ```
 
 ## Running Tests
@@ -73,7 +75,7 @@ pytest -x
 The test suite aims for a minimum of 70% code coverage. Current coverage includes:
 
 - **sheets_client.py**: Authentication, reading/writing URLs, rate limiting, error handling
-- **cypress_runner.py**: Cypress execution, retries, timeout handling, result parsing
+- **playwright_runner.py**: Playwright execution, retries, timeout handling, result parsing, instance pooling, cache integration
 - **logger.py**: Logger setup, file/console handlers, thread safety
 - **run_audit.py**: URL processing, error handling, concurrent execution, signal handling
 
@@ -87,6 +89,8 @@ Shared fixtures are defined in `conftest.py`:
 - `sample_urls`: Sample URL data for testing
 - `sample_cypress_result`: Sample Cypress result (passing scores)
 - `sample_cypress_result_failing`: Sample Cypress result (failing scores)
+- `sample_playwright_result`: Sample Playwright result (passing scores)
+- `sample_playwright_result_failing`: Sample Playwright result (failing scores)
 - `temp_service_account_file`: Temporary service account JSON file
 
 ## Test Categories

@@ -33,19 +33,22 @@ def generate_html_dashboard(metrics: Dict, output_file: str = 'dashboard.html'):
         sys.exit(1)
     
     fig = make_subplots(
-        rows=3, cols=2,
+        rows=4, cols=2,
         subplot_titles=(
             'URL Processing Status',
             'Success vs Failure Rate',
             'Cache Performance',
             'API Usage',
             'Processing Time',
-            'Failure Reasons'
+            'Failure Reasons',
+            'Playwright Warm/Cold Starts',
+            'Playwright Performance'
         ),
         specs=[
             [{"type": "pie"}, {"type": "bar"}],
             [{"type": "pie"}, {"type": "bar"}],
-            [{"type": "indicator"}, {"type": "bar"}]
+            [{"type": "indicator"}, {"type": "bar"}],
+            [{"type": "pie"}, {"type": "bar"}]
         ]
     )
     
@@ -137,8 +140,43 @@ def generate_html_dashboard(metrics: Dict, output_file: str = 'dashboard.html'):
             row=3, col=2
         )
     
+    pw_metrics = metrics.get('playwright', {})
+    if pw_metrics:
+        fig.add_trace(
+            go.Pie(
+                labels=['Warm Starts', 'Cold Starts'],
+                values=[
+                    pw_metrics.get('warm_starts', 0),
+                    pw_metrics.get('cold_starts', 0)
+                ],
+                marker=dict(colors=['#2ecc71', '#3498db']),
+                name='Start Type'
+            ),
+            row=4, col=1
+        )
+        
+        fig.add_trace(
+            go.Bar(
+                x=['Page Load', 'Browser Startup', 'Avg Memory'],
+                y=[
+                    pw_metrics.get('avg_page_load_time_seconds', 0),
+                    pw_metrics.get('avg_browser_startup_time_seconds', 0),
+                    pw_metrics.get('avg_memory_usage_mb', 0) / 100
+                ],
+                marker=dict(color=['#9b59b6', '#1abc9c', '#e67e22']),
+                text=[
+                    f"{pw_metrics.get('avg_page_load_time_seconds', 0):.2f}s",
+                    f"{pw_metrics.get('avg_browser_startup_time_seconds', 0):.2f}s",
+                    f"{pw_metrics.get('avg_memory_usage_mb', 0):.0f}MB"
+                ],
+                textposition='auto',
+                name='Performance'
+            ),
+            row=4, col=2
+        )
+    
     fig.update_layout(
-        height=1200,
+        height=1600,
         title_text=f"PageSpeed Insights Audit Dashboard - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         showlegend=False
     )
@@ -275,6 +313,9 @@ def generate_html_dashboard(metrics: Dict, output_file: str = 'dashboard.html'):
         </div>
     </div>
     
+    {generate_playwright_metrics_html(metrics) if metrics.get('playwright') else ''}
+    
+    
     <div class="charts">
         {fig.to_html(include_plotlyjs='cdn', div_id='plotly-chart')}
     </div>
@@ -298,6 +339,56 @@ def generate_alert_html(metrics: Dict) -> str:
         <h3>⚠️ Alert: High Failure Rate Detected</h3>
         <p>Current failure rate ({metrics['failure_rate_percent']:.1f}%) has exceeded the 20% threshold.</p>
         <p>Failed URLs: {metrics['failed_urls']} out of {metrics['analyzed_urls']} analyzed</p>
+    </div>
+    """
+
+
+def generate_playwright_metrics_html(metrics: Dict) -> str:
+    """Generate HTML for Playwright-specific metrics"""
+    pw = metrics.get('playwright', {})
+    if not pw:
+        return ''
+    
+    return f"""
+    <div style="margin-bottom: 30px;">
+        <h2 style="color: #333; margin-bottom: 20px;">🎭 Playwright Performance Metrics</h2>
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <h3>Avg Page Load Time</h3>
+                <div class="value">{pw.get('avg_page_load_time_seconds', 0):.2f}s</div>
+                <div class="subvalue">{pw.get('total_page_loads', 0)} page loads</div>
+            </div>
+            
+            <div class="metric-card">
+                <h3>Avg Browser Startup</h3>
+                <div class="value">{pw.get('avg_browser_startup_time_seconds', 0):.2f}s</div>
+                <div class="subvalue">Cold starts only</div>
+            </div>
+            
+            <div class="metric-card">
+                <h3>Warm Start Ratio</h3>
+                <div class="value success">{pw.get('warm_start_ratio_percent', 0):.1f}%</div>
+                <div class="subvalue">{pw.get('warm_starts', 0)} warm / {pw.get('cold_starts', 0)} cold</div>
+            </div>
+            
+            <div class="metric-card">
+                <h3>Avg Memory Usage</h3>
+                <div class="value">{pw.get('avg_memory_usage_mb', 0):.1f} MB</div>
+                <div class="subvalue">Max: {pw.get('max_memory_usage_mb', 0):.1f} MB</div>
+            </div>
+            
+            <div class="metric-card">
+                <h3>Request Blocking</h3>
+                <div class="value warning">{pw.get('blocking_ratio_percent', 0):.1f}%</div>
+                <div class="subvalue">{pw.get('blocked_requests', 0)} / {pw.get('total_requests', 0)} blocked</div>
+            </div>
+            
+            <div class="metric-card">
+                <h3>Total Starts</h3>
+                <div class="value">{pw.get('total_starts', 0)}</div>
+                <div class="subvalue">Browser instances created</div>
+            </div>
+        </div>
     </div>
     """
 
@@ -361,6 +452,15 @@ def main():
     print(f"  Failed: {metrics['failed_urls']} ({metrics['failure_rate_percent']:.1f}%)")
     print(f"  Cache Hit Ratio: {metrics['cache_hit_ratio_percent']:.1f}%")
     print(f"  Avg Processing Time: {metrics['avg_processing_time_seconds']:.1f}s")
+    
+    pw_metrics = metrics.get('playwright')
+    if pw_metrics:
+        print("\nPlaywright Performance:")
+        print(f"  Avg Page Load Time: {pw_metrics.get('avg_page_load_time_seconds', 0):.2f}s")
+        print(f"  Avg Browser Startup: {pw_metrics.get('avg_browser_startup_time_seconds', 0):.2f}s")
+        print(f"  Warm Start Ratio: {pw_metrics.get('warm_start_ratio_percent', 0):.1f}%")
+        print(f"  Avg Memory Usage: {pw_metrics.get('avg_memory_usage_mb', 0):.1f} MB")
+        print(f"  Request Blocking: {pw_metrics.get('blocking_ratio_percent', 0):.1f}%")
     
     if metrics['alert_triggered']:
         print("\n⚠️  ALERT: Failure rate exceeded 20% threshold!")

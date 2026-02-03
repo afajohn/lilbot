@@ -181,12 +181,9 @@ def check_project_structure():
         'run_audit.py',
         'list_tabs.py',
         'requirements.txt',
-        'package.json',
-        'cypress.config.js',
         'tools/sheets/sheets_client.py',
-        'tools/qa/cypress_runner.py',
-        'tools/utils/logger.py',
-        'cypress/e2e/analyze-url.cy.js'
+        'tools/qa/playwright_runner.py',
+        'tools/utils/logger.py'
     ]
     
     all_present = True

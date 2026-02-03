@@ -10,7 +10,7 @@ import run_audit
 
 
 class TestProcessUrl:
-    @patch('qa.cypress_runner.run_analysis')
+    @patch('qa.playwright_runner.run_analysis')
     @patch('sheets.sheets_client.batch_write_psi_urls')
     def test_process_url_passing_scores(self, mock_batch_write, mock_run_analysis, mock_google_service):
         mock_run_analysis.return_value = {
@@ -44,7 +44,7 @@ class TestProcessUrl:
         assert (2, 'F', 'passed') in updates
         assert (2, 'G', 'passed') in updates
     
-    @patch('qa.cypress_runner.run_analysis')
+    @patch('qa.playwright_runner.run_analysis')
     @patch('sheets.sheets_client.batch_write_psi_urls')
     def test_process_url_failing_scores(self, mock_batch_write, mock_run_analysis, mock_google_service):
         mock_run_analysis.return_value = {
@@ -76,7 +76,7 @@ class TestProcessUrl:
         assert (2, 'F', 'https://psi.mobile') in updates
         assert (2, 'G', 'https://psi.desktop') in updates
     
-    @patch('qa.cypress_runner.run_analysis')
+    @patch('qa.playwright_runner.run_analysis')
     @patch('sheets.sheets_client.batch_write_psi_urls')
     def test_process_url_skip_existing_mobile(self, mock_batch_write, mock_run_analysis, mock_google_service):
         mock_run_analysis.return_value = {
@@ -138,10 +138,10 @@ class TestProcessUrl:
         
         assert result['skipped'] is True
     
-    @patch('qa.cypress_runner.run_analysis')
-    def test_process_url_cypress_timeout(self, mock_run_analysis, mock_google_service):
-        from qa.cypress_runner import CypressTimeoutError
-        mock_run_analysis.side_effect = CypressTimeoutError("Timeout after 600 seconds")
+    @patch('qa.playwright_runner.run_analysis')
+    def test_process_url_playwright_timeout(self, mock_run_analysis, mock_google_service):
+        from qa.playwright_runner import PlaywrightTimeoutError
+        mock_run_analysis.side_effect = PlaywrightTimeoutError("Timeout after 600 seconds")
         
         url_data = (2, 'https://example.com', None, None, False)
         processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
@@ -159,10 +159,10 @@ class TestProcessUrl:
         assert 'error' in result
         assert 'Timeout' in result['error']
     
-    @patch('qa.cypress_runner.run_analysis')
-    def test_process_url_cypress_error(self, mock_run_analysis, mock_google_service):
-        from qa.cypress_runner import CypressRunnerError
-        mock_run_analysis.side_effect = CypressRunnerError("Cypress failed")
+    @patch('qa.playwright_runner.run_analysis')
+    def test_process_url_playwright_error(self, mock_run_analysis, mock_google_service):
+        from qa.playwright_runner import PlaywrightRunnerError
+        mock_run_analysis.side_effect = PlaywrightRunnerError("Playwright failed")
         
         url_data = (2, 'https://example.com', None, None, False)
         processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
@@ -178,9 +178,9 @@ class TestProcessUrl:
         )
         
         assert 'error' in result
-        assert 'Cypress failed' in result['error']
+        assert 'Playwright failed' in result['error']
     
-    @patch('qa.cypress_runner.run_analysis')
+    @patch('qa.playwright_runner.run_analysis')
     def test_process_url_unexpected_error(self, mock_run_analysis, mock_google_service):
         mock_run_analysis.side_effect = Exception("Unexpected error")
         
