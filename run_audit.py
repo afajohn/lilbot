@@ -315,11 +315,13 @@ def process_url(
             'mobile_score': mobile_score,
             'desktop_score': desktop_score,
             'mobile_psi_url': mobile_psi_url,
-            'desktop_psi_url': desktop_psi_url
+            'desktop_psi_url': desktop_psi_url,
+            'success': True
         }
         
     except playwright_runner.PlaywrightAnalysisTimeoutError as e:
         error_msg = f"Timeout - {e}"
+        short_error = f"ERROR: Analysis timeout ({timeout}s)"
         if progress_bar:
             progress_bar.set_description(f"Timeout (row {row_index})")
             progress_bar.update(1)
@@ -341,15 +343,41 @@ def process_url(
             traceback=traceback.format_exc()
         )
         metrics_collector.record_url_failure(start_time, reason='timeout')
+        
+        updates = []
+        if not existing_mobile_psi:
+            updates.append((row_index, MOBILE_COLUMN, short_error))
+        if not existing_desktop_psi:
+            updates.append((row_index, DESKTOP_COLUMN, short_error))
+        
+        if updates:
+            try:
+                sheets_client.batch_write_psi_urls(
+                    spreadsheet_id,
+                    tab_name,
+                    updates,
+                    service=service,
+                    dry_run=dry_run
+                )
+                if not progress_bar:
+                    with log_lock:
+                        log.info(f"  Wrote error indicator to spreadsheet")
+            except Exception as write_error:
+                if not progress_bar:
+                    with log_lock:
+                        log.error(f"  Failed to write error indicator: {write_error}")
+        
         return {
             'row': row_index,
             'url': url,
             'error': str(e),
-            'error_type': 'timeout'
+            'error_type': 'timeout',
+            'failed': True
         }
         
     except playwright_runner.PlaywrightRunnerError as e:
         error_msg = f"Playwright failed - {e}"
+        short_error = f"ERROR: Playwright failed"
         if progress_bar:
             progress_bar.set_description(f"Playwright error (row {row_index})")
             progress_bar.update(1)
@@ -371,15 +399,41 @@ def process_url(
             traceback=traceback.format_exc()
         )
         metrics_collector.record_url_failure(start_time, reason='playwright')
+        
+        updates = []
+        if not existing_mobile_psi:
+            updates.append((row_index, MOBILE_COLUMN, short_error))
+        if not existing_desktop_psi:
+            updates.append((row_index, DESKTOP_COLUMN, short_error))
+        
+        if updates:
+            try:
+                sheets_client.batch_write_psi_urls(
+                    spreadsheet_id,
+                    tab_name,
+                    updates,
+                    service=service,
+                    dry_run=dry_run
+                )
+                if not progress_bar:
+                    with log_lock:
+                        log.info(f"  Wrote error indicator to spreadsheet")
+            except Exception as write_error:
+                if not progress_bar:
+                    with log_lock:
+                        log.error(f"  Failed to write error indicator: {write_error}")
+        
         return {
             'row': row_index,
             'url': url,
             'error': str(e),
-            'error_type': 'playwright'
+            'error_type': 'playwright',
+            'failed': True
         }
         
     except PermanentError as e:
         error_msg = f"Permanent error - {e}"
+        short_error = f"ERROR: Permanent error"
         if progress_bar:
             progress_bar.set_description(f"Permanent error (row {row_index})")
             progress_bar.update(1)
@@ -401,15 +455,41 @@ def process_url(
             traceback=traceback.format_exc()
         )
         metrics_collector.record_url_failure(start_time, reason='permanent')
+        
+        updates = []
+        if not existing_mobile_psi:
+            updates.append((row_index, MOBILE_COLUMN, short_error))
+        if not existing_desktop_psi:
+            updates.append((row_index, DESKTOP_COLUMN, short_error))
+        
+        if updates:
+            try:
+                sheets_client.batch_write_psi_urls(
+                    spreadsheet_id,
+                    tab_name,
+                    updates,
+                    service=service,
+                    dry_run=dry_run
+                )
+                if not progress_bar:
+                    with log_lock:
+                        log.info(f"  Wrote error indicator to spreadsheet")
+            except Exception as write_error:
+                if not progress_bar:
+                    with log_lock:
+                        log.error(f"  Failed to write error indicator: {write_error}")
+        
         return {
             'row': row_index,
             'url': url,
             'error': str(e),
-            'error_type': 'permanent'
+            'error_type': 'permanent',
+            'failed': True
         }
         
     except RetryableError as e:
         error_msg = f"Retryable error - {e}"
+        short_error = f"ERROR: Retryable error"
         if progress_bar:
             progress_bar.set_description(f"Retryable error (row {row_index})")
             progress_bar.update(1)
@@ -431,15 +511,41 @@ def process_url(
             traceback=traceback.format_exc()
         )
         metrics_collector.record_url_failure(start_time, reason='retryable')
+        
+        updates = []
+        if not existing_mobile_psi:
+            updates.append((row_index, MOBILE_COLUMN, short_error))
+        if not existing_desktop_psi:
+            updates.append((row_index, DESKTOP_COLUMN, short_error))
+        
+        if updates:
+            try:
+                sheets_client.batch_write_psi_urls(
+                    spreadsheet_id,
+                    tab_name,
+                    updates,
+                    service=service,
+                    dry_run=dry_run
+                )
+                if not progress_bar:
+                    with log_lock:
+                        log.info(f"  Wrote error indicator to spreadsheet")
+            except Exception as write_error:
+                if not progress_bar:
+                    with log_lock:
+                        log.error(f"  Failed to write error indicator: {write_error}")
+        
         return {
             'row': row_index,
             'url': url,
             'error': str(e),
-            'error_type': 'retryable'
+            'error_type': 'retryable',
+            'failed': True
         }
         
     except Exception as e:
         error_msg = f"Unexpected error - {e}"
+        short_error = f"ERROR: Unexpected error"
         if progress_bar:
             progress_bar.set_description(f"Unexpected error (row {row_index})")
             progress_bar.update(1)
@@ -461,11 +567,36 @@ def process_url(
             traceback=traceback.format_exc()
         )
         metrics_collector.record_url_failure(start_time, reason='unexpected')
+        
+        updates = []
+        if not existing_mobile_psi:
+            updates.append((row_index, MOBILE_COLUMN, short_error))
+        if not existing_desktop_psi:
+            updates.append((row_index, DESKTOP_COLUMN, short_error))
+        
+        if updates:
+            try:
+                sheets_client.batch_write_psi_urls(
+                    spreadsheet_id,
+                    tab_name,
+                    updates,
+                    service=service,
+                    dry_run=dry_run
+                )
+                if not progress_bar:
+                    with log_lock:
+                        log.info(f"  Wrote error indicator to spreadsheet")
+            except Exception as write_error:
+                if not progress_bar:
+                    with log_lock:
+                        log.error(f"  Failed to write error indicator: {write_error}")
+        
         return {
             'row': row_index,
             'url': url,
             'error': str(e),
-            'error_type': 'unexpected'
+            'error_type': 'unexpected',
+            'failed': True
         }
 
 
@@ -912,11 +1043,39 @@ def main():
                         is_retryable=False,
                         traceback=traceback.format_exc()
                     )
+                    
+                    row_index = url_data[0]
+                    url = url_data[1]
+                    short_error = f"ERROR: Unexpected error"
+                    
+                    try:
+                        existing_mobile_psi = url_data[2] if len(url_data) > 2 else None
+                        existing_desktop_psi = url_data[3] if len(url_data) > 3 else None
+                        
+                        updates = []
+                        if not existing_mobile_psi:
+                            updates.append((row_index, MOBILE_COLUMN, short_error))
+                        if not existing_desktop_psi:
+                            updates.append((row_index, DESKTOP_COLUMN, short_error))
+                        
+                        if updates and not args.dry_run:
+                            sheets_client.batch_write_psi_urls(
+                                args.spreadsheet_id,
+                                args.tab,
+                                updates,
+                                service=service,
+                                dry_run=False
+                            )
+                            log.info(f"  Wrote error indicator to spreadsheet for row {row_index}")
+                    except Exception as write_error:
+                        log.error(f"  Failed to write error indicator for row {row_index}: {write_error}")
+                    
                     results.append({
-                        'row': url_data[0],
-                        'url': url_data[1],
+                        'row': row_index,
+                        'url': url,
                         'error': str(e),
-                        'error_type': 'unexpected'
+                        'error_type': 'unexpected',
+                        'failed': True
                     })
         except KeyboardInterrupt:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -933,10 +1092,12 @@ def main():
     log.info("=" * 80)
     
     total_urls = len(results)
-    skipped = sum(1 for r in results if r.get('skipped', False))
+    skipped_already_passed = sum(1 for r in results if r.get('skipped', False) and not r.get('error'))
     dry_run_count = sum(1 for r in results if r.get('dry_run', False))
-    analyzed = sum(1 for r in results if not r.get('skipped', False) and 'error' not in r and not r.get('dry_run', False))
-    failed = sum(1 for r in results if 'error' in r)
+    successfully_analyzed = sum(1 for r in results if r.get('success', False))
+    failed_analyses = sum(1 for r in results if r.get('failed', False))
+    validation_failed = sum(1 for r in results if r.get('error_type') == 'validation_failed')
+    invalid_url = sum(1 for r in results if r.get('error_type') == 'invalid_url')
     
     mobile_pass = sum(1 for r in results if r.get('mobile_score') is not None and r['mobile_score'] >= SCORE_THRESHOLD)
     mobile_fail = sum(1 for r in results if r.get('mobile_score') is not None and r['mobile_score'] < SCORE_THRESHOLD)
@@ -944,11 +1105,15 @@ def main():
     desktop_fail = sum(1 for r in results if r.get('desktop_score') is not None and r['desktop_score'] < SCORE_THRESHOLD)
     
     log.info(f"Total URLs processed: {total_urls}")
-    log.info(f"URLs skipped: {skipped}")
+    log.info(f"URLs skipped (already passed): {skipped_already_passed}")
     if args.dry_run:
         log.info(f"URLs simulated (dry run): {dry_run_count}")
-    log.info(f"URLs analyzed: {analyzed}")
-    log.info(f"Failed analyses: {failed}")
+    log.info(f"URLs successfully analyzed: {successfully_analyzed}")
+    log.info(f"Failed analyses (ERROR written to cells): {failed_analyses}")
+    if validation_failed > 0:
+        log.info(f"URLs failed validation: {validation_failed}")
+    if invalid_url > 0:
+        log.info(f"Invalid URLs: {invalid_url}")
     log.info("")
     log.info(f"Mobile scores >= {SCORE_THRESHOLD}: {mobile_pass}")
     log.info(f"Mobile scores < {SCORE_THRESHOLD}: {mobile_fail}")
@@ -956,20 +1121,16 @@ def main():
     log.info(f"Desktop scores < {SCORE_THRESHOLD}: {desktop_fail}")
     log.info("")
     
-    validation_failed = sum(1 for r in results if r.get('error_type') == 'validation_failed')
-    if validation_failed > 0:
-        log.info(f"URLs failed validation: {validation_failed}")
-    
-    if failed > 0:
-        log.info("Failed URLs:")
+    if failed_analyses > 0:
+        log.info("Failed Analyses (with ERROR indicators written to spreadsheet):")
         error_types = {}
         for r in results:
-            if 'error' in r:
+            if r.get('failed', False):
                 error_type = r.get('error_type', 'unknown')
                 error_types[error_type] = error_types.get(error_type, 0) + 1
                 log.info(f"  Row {r['row']}: {r['url']}")
                 log.info(f"    Error Type: {error_type}")
-                log.info(f"    Error: {r['error']}")
+                log.info(f"    Error: {r.get('error', 'Unknown error')}")
         
         log.info("")
         log.info("Error Types Summary:")
@@ -977,10 +1138,20 @@ def main():
             log.info(f"  {error_type}: {count}")
         log.info("")
     
+    if validation_failed > 0 or invalid_url > 0:
+        log.info("URLs with Validation/Format Errors:")
+        for r in results:
+            if r.get('error_type') in ['validation_failed', 'invalid_url']:
+                log.info(f"  Row {r['row']}: {r['url']}")
+                log.info(f"    Error: {r.get('error', 'Unknown error')}")
+        log.info("")
+    
     if mobile_pass > 0 or desktop_pass > 0:
         log.info(f"Cells with score >= {SCORE_THRESHOLD} marked as 'passed'.")
     if mobile_fail > 0 or desktop_fail > 0:
         log.info(f"PSI URLs for failing scores written to columns {MOBILE_COLUMN} (mobile) and {DESKTOP_COLUMN} (desktop).")
+    if failed_analyses > 0:
+        log.info(f"ERROR indicators written to cells for {failed_analyses} failed analyses.")
     
     log.info("=" * 80)
     
