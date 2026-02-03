@@ -243,14 +243,16 @@ def process_url(
         if not existing_mobile_psi and mobile_score is not None:
             if mobile_score >= SCORE_THRESHOLD:
                 updates.append((row_index, MOBILE_COLUMN, 'passed'))
-            elif mobile_psi_url:
-                updates.append((row_index, MOBILE_COLUMN, mobile_psi_url))
+            else:
+                if mobile_psi_url:
+                    updates.append((row_index, MOBILE_COLUMN, mobile_psi_url))
         
         if not existing_desktop_psi and desktop_score is not None:
             if desktop_score >= SCORE_THRESHOLD:
                 updates.append((row_index, DESKTOP_COLUMN, 'passed'))
-            elif desktop_psi_url:
-                updates.append((row_index, DESKTOP_COLUMN, desktop_psi_url))
+            else:
+                if desktop_psi_url:
+                    updates.append((row_index, DESKTOP_COLUMN, desktop_psi_url))
         
         if updates:
             try:
