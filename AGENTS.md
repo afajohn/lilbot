@@ -68,6 +68,9 @@ python run_audit.py --tab "TAB_NAME" --no-progress-bar
 
 # Optional: Force retry mode (bypass circuit breaker during critical runs)
 python run_audit.py --tab "TAB_NAME" --force-retry
+
+# Optional: Debug mode (verbose logging, screenshots, and HTML capture on errors)
+python run_audit.py --tab "TAB_NAME" --debug-mode
 ```
 
 **Validate Service Account:**
@@ -157,6 +160,43 @@ python -m pytest  # Or use run_tests.ps1 (Windows) or ./run_tests.sh (Unix)
   - `pyyaml` - YAML configuration file support
   - `playwright` - Browser automation for PageSpeed Insights
 
+## Error Handling and Recovery
+
+The Playwright runner includes comprehensive error handling and recovery mechanisms:
+
+### Page Reload Logic
+- Automatically reloads page when selectors fail repeatedly (up to 3 attempts)
+- Fresh start logic ensures clean state after failures
+- Tracks reload attempts to prevent infinite loops
+
+### Debug Mode (`--debug-mode`)
+When enabled, the system:
+- Captures screenshots on failures (saved to `debug_screenshots/`)
+- Saves page HTML on errors for post-mortem analysis
+- Enables verbose Playwright logging
+- Includes timestamp and sanitized URL in filenames
+- Creates enhanced error messages with diagnostic information
+
+### Enhanced Error Messages
+Error messages include:
+- Current page URL and title
+- Available buttons and elements on the page
+- Last successful step before failure
+- Paths to debug screenshots and HTML files
+- Visibility status of page elements
+
+### Recovery Strategies
+1. **Selector Timeout**: Retries with page reload
+2. **Analysis Timeout**: Aborts immediately (not retryable)
+3. **Button Not Found**: Reloads page and retries with multiple selectors
+4. **Score Extraction Failed**: Captures debug artifacts and provides detailed context
+
+### Debug Artifacts
+All debug files are saved with format: `YYYYMMDD_HHMMSS_sanitized-url_reason.{png|html}`
+- Screenshots: Full-page captures in PNG format
+- HTML: Complete page source at time of error
+- Organized in `debug_screenshots/` directory (gitignored)
+
 ## Performance Optimizations
 
 The system has been comprehensively optimized for faster URL processing:
@@ -242,6 +282,7 @@ The system has been comprehensively optimized for faster URL processing:
 │       ├── logger.py         # Logging utilities
 │       └── url_validator.py  # URL validation (regex, DNS, redirects) and normalization
 ├── .cache/                   # File cache storage (gitignored)
+├── debug_screenshots/        # Debug screenshots and HTML files (gitignored)
 ├── metrics.json              # JSON metrics export (gitignored)
 ├── metrics.prom              # Prometheus metrics export (gitignored)
 ├── dashboard.html            # HTML metrics dashboard (gitignored)
@@ -293,7 +334,13 @@ The system has been comprehensively optimized for faster URL processing:
 - Runs PageSpeed Insights analysis with proper error handling
 - **Persistent Retry Logic**: Infinite retry with exponential backoff (5s-60s) for retryable errors until success or explicit timeout
 - **Smart Timeout Handling**: Distinguishes between analysis timeout (abort) vs selector timeout (retry with fresh page load)
+- **Page Reload Recovery**: Automatically reloads page when selectors fail repeatedly (up to 3 attempts)
 - **Circuit Breaker**: Protects against cascading failures, can be bypassed with `force_retry` flag
+- **Enhanced Error Messages**: Includes current page URL, available elements, last successful step, and debug artifacts
+- **Debug Mode Support**: Captures screenshots and HTML on errors when `--debug-mode` is enabled
+- **Debug Screenshots**: Saves full-page screenshots to `debug_screenshots/` with timestamp and URL
+- **Debug HTML**: Saves complete page source for post-mortem analysis
+- **Page Diagnostics**: Extracts buttons, inputs, links, and their visibility status for debugging
 - Returns structured results with performance metrics
 - **Progressive Timeout**: Starts at 300s, increases to 600s after first failure
 - **Instance Pooling**: Maintains pool of up to 3 reusable browser contexts for warm starts

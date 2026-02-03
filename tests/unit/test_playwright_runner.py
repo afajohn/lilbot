@@ -193,7 +193,7 @@ class TestScoreExtraction:
         
         page.locator = Mock(return_value=Mock(all=Mock(return_value=[score_elem])))
         
-        score = _extract_score_from_element(page, 'mobile')
+        score = _extract_score_from_element(page, 'mobile', 'https://example.com')
         
         assert score == 85
         page.locator.assert_called()
@@ -213,7 +213,7 @@ class TestScoreExtraction:
         
         page.locator = mock_locator
         
-        score = _extract_score_from_element(page, 'desktop')
+        score = _extract_score_from_element(page, 'desktop', 'https://example.com')
         
         assert score == 92
     
@@ -221,7 +221,7 @@ class TestScoreExtraction:
         page = Mock()
         page.locator = Mock(return_value=Mock(all=Mock(return_value=[])))
         
-        score = _extract_score_from_element(page, 'mobile')
+        score = _extract_score_from_element(page, 'mobile', 'https://example.com')
         
         assert score is None
     
@@ -233,7 +233,7 @@ class TestScoreExtraction:
         
         page.locator = Mock(return_value=Mock(all=Mock(return_value=[score_elem])))
         
-        score = _extract_score_from_element(page, 'mobile')
+        score = _extract_score_from_element(page, 'mobile', 'https://example.com')
         
         assert score is None
 
@@ -280,21 +280,25 @@ class TestTimeoutHandling:
         assert pt.get_timeout() == 600
     
     def test_wait_for_analysis_completion_success(self):
+        from tools.qa.playwright_runner import PageReloadTracker
         page = Mock()
         
         score_elem = Mock()
         page.locator = Mock(return_value=Mock(all=Mock(return_value=[score_elem])))
+        reload_tracker = PageReloadTracker()
         
-        result = _wait_for_analysis_completion(page, timeout_seconds=5)
+        result = _wait_for_analysis_completion(page, 'https://example.com', reload_tracker, timeout_seconds=5)
         
         assert result is True
     
     def test_wait_for_analysis_completion_timeout(self):
+        from tools.qa.playwright_runner import PageReloadTracker
         page = Mock()
         page.locator = Mock(return_value=Mock(all=Mock(return_value=[])))
+        reload_tracker = PageReloadTracker()
         
         with patch('time.sleep'):
-            result = _wait_for_analysis_completion(page, timeout_seconds=1)
+            result = _wait_for_analysis_completion(page, 'https://example.com', reload_tracker, timeout_seconds=1)
         
         assert result is False
 

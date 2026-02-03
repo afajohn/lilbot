@@ -76,3 +76,6 @@ audit-config.yml
 
 # Test scenario files
 test_scenarios.json
+
+# Debug artifacts (playwright_runner.py)
+debug_screenshots/

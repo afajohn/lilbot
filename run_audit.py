@@ -592,6 +592,11 @@ def main():
         action='store_true',
         help='Bypass circuit breaker and force retries during critical runs'
     )
+    parser.add_argument(
+        '--debug-mode',
+        action='store_true',
+        help='Enable debug mode with verbose Playwright logging, screenshots, and HTML capture on errors'
+    )
     
     args = parser.parse_args()
     
@@ -641,6 +646,10 @@ def main():
     
     log = logger.setup_logger()
     metrics = get_global_metrics()
+    
+    if args.debug_mode:
+        playwright_runner.set_debug_mode(True)
+        log.info("Debug mode enabled: verbose logging, screenshots, and HTML capture on errors")
     
     if not os.path.exists(args.service_account):
         log.error(f"Service account file not found: {args.service_account}")
@@ -831,6 +840,8 @@ def main():
         log.info("DRY RUN MODE: No changes will be made to the spreadsheet")
     if args.force_retry:
         log.info("FORCE RETRY MODE: Circuit breaker will be bypassed")
+    if args.debug_mode:
+        log.info("DEBUG MODE: Screenshots and HTML capture enabled on errors")
     if args.whitelist:
         log.info(f"URL whitelist: {args.whitelist}")
     if args.blacklist:
