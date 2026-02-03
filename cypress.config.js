@@ -6,7 +6,7 @@ module.exports = defineConfig({
   e2e: {
     baseUrl: 'https://pagespeed.web.dev',
     video: false,
-    screenshotOnRunFailure: false,
+    screenshotOnRunFailure: true,
     viewportWidth: 1280,
     viewportHeight: 720,
     defaultCommandTimeout: 10000,

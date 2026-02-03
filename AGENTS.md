@@ -131,10 +131,15 @@ The system has been optimized for faster URL processing:
 
 #### analyze-url.cy.js
 - Cypress test that automates PageSpeed Insights
+- **URL Validation**: Pre-checks URL accessibility before analysis (30s timeout)
 - Visits pagespeed.web.dev
+- **Smart Selectors**: Uses data-testid attributes with fallbacks to brittle text-based selectors
+- **Viewport Detection**: Detects and logs viewport changes for responsive UI handling
 - Enters URL and triggers analysis (both mobile and desktop results available after single analysis)
-- Switches between Mobile/Desktop views to extract scores from `.lh-exp-gauge__percentage` text
+- **Smart Wait**: Polls for score elements with configurable intervals (max 120s, poll every 2s)
+- Switches between Mobile/Desktop views to extract scores with fallback selector hierarchy
 - Collects report URLs for scores < 80
+- **Screenshot on Failure**: Automatically captures full-page screenshots when tests fail
 - Saves results to JSON
 - Configured with 2 automatic retries on failure (reduced from 5)
 - Optimized timeout values (defaultCommandTimeout: 10s, pageLoadTimeout: 120s)
@@ -216,10 +221,11 @@ Edit `SCORE_THRESHOLD` in `run_audit.py`.
 If PageSpeed Insights UI changes:
 1. Edit `cypress/e2e/analyze-url.cy.js`
 2. Update selectors to match new DOM structure
-3. Current key selectors:
-   - Analyze button: `button` containing text matching `/analyze/i`
-   - Score display: `.lh-exp-gauge__percentage` (extracts text directly)
-   - Mobile/Desktop toggle: `button` containing 'Mobile' or 'Desktop'
+3. Current key selectors (with fallback hierarchy):
+   - URL input: `[data-testid="url-input"]` → `input[name="url"]`
+   - Analyze button: `[data-testid*="analyze"]` → `button` containing text matching `/analyze/i`
+   - Score display: `[data-testid="score-gauge"]` → `.lh-exp-gauge__percentage` → `.lh-gauge__percentage`
+   - Mobile/Desktop toggle: `[data-testid*="mobile/desktop"]` → `button` containing 'Mobile' or 'Desktop'
 4. Test with `npx cypress open`
 
 ### Adding More Retry Attempts
