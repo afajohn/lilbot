@@ -819,7 +819,12 @@ def main():
     metrics_collector.save_prometheus_metrics('metrics.prom')
     log.info("Metrics saved to metrics.json and metrics.prom")
     log.info("Generate HTML dashboard with: python generate_report.py")
+    
+    cypress_runner.shutdown_pool()
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        cypress_runner.shutdown_pool()

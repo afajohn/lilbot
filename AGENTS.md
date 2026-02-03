@@ -122,8 +122,14 @@ The system has been optimized for faster URL processing:
 5. **Incremental Updates**: Spreadsheet updates happen immediately after each URL (not batched at end)
 6. **Explicit Headless Mode**: Cypress runs in headless mode with explicit flags
 7. **Optimized Analysis**: PageSpeed Insights runs once, then switches between Mobile/Desktop views
+8. **Instance Pooling**: Cypress instances are pooled and reused across URLs (warm start vs cold start)
+9. **Result Streaming**: Results are streamed to avoid large JSON file I/O operations
+10. **Progressive Timeout**: Timeout starts at 300s, increases to 600s after first failure
+11. **Memory Monitoring**: Automatic monitoring of Cypress process memory usage with auto-restart on >1GB
 
 **Key Issue Resolved**: Running `npx cypress open` while `run_audit.py` is executing blocks the headless Cypress instance. Always close the Cypress UI before running audits.
+
+**Instance Pooling Details**: The Cypress runner maintains a pool of up to 2 instances that can be reused across multiple URL analyses. Warm start instances reuse existing browser contexts for faster execution. Instances are automatically killed and removed from the pool when they exceed 1GB memory usage or experience 3+ consecutive failures. The pool is automatically cleaned up on application shutdown.
 
 ## Architecture
 
@@ -211,10 +217,13 @@ The system has been optimized for faster URL processing:
 - Finds npx executable
 - Runs Cypress tests with proper encoding (UTF-8)
 - Handles timeouts and retries (up to 3 retry attempts with fixed 5s wait)
-- Parses JSON results
-- Default timeout: 600 seconds (10 minutes)
+- Parses JSON results via streaming to avoid large file I/O
+- **Progressive Timeout**: Starts at 300s, increases to 600s after first failure
+- **Instance Pooling**: Maintains pool of up to 2 reusable Cypress instances for warm starts
+- **Memory Monitoring**: Monitors process memory usage and auto-restarts on >1GB
 - **Critical Fix**: Uses `encoding='utf-8', errors='replace'` to prevent Windows UnicodeDecodeError
 - Runs Cypress in explicit headless mode for better performance
+- Pool cleanup via `shutdown_pool()` called on application exit
 
 #### analyze-url.cy.js
 - Cypress test that automates PageSpeed Insights
