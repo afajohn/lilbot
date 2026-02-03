@@ -2,14 +2,19 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from typing import List, Tuple, Optional
+import threading
 
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 
+_auth_lock = threading.Lock()
+_service_cache = {}
+
+
 def authenticate(service_account_file: str):
     """
-    Authenticate using a service account JSON file.
+    Authenticate using a service account JSON file with connection pooling.
     
     Args:
         service_account_file: Path to the service account JSON credentials file
@@ -22,21 +27,27 @@ def authenticate(service_account_file: str):
         ValueError: If service account file is invalid
     """
     import os
-    if not os.path.exists(service_account_file):
-        raise FileNotFoundError(
-            f"Service account file not found: {service_account_file}\n"
-            f"Please download your service account JSON file from Google Cloud Console "
-            f"and save it as '{service_account_file}'"
-        )
     
-    try:
-        credentials = service_account.Credentials.from_service_account_file(
-            service_account_file, scopes=SCOPES
-        )
-        service = build('sheets', 'v4', credentials=credentials)
-        return service
-    except Exception as e:
-        raise ValueError(f"Invalid service account file: {e}")
+    with _auth_lock:
+        if service_account_file in _service_cache:
+            return _service_cache[service_account_file]
+        
+        if not os.path.exists(service_account_file):
+            raise FileNotFoundError(
+                f"Service account file not found: {service_account_file}\n"
+                f"Please download your service account JSON file from Google Cloud Console "
+                f"and save it as '{service_account_file}'"
+            )
+        
+        try:
+            credentials = service_account.Credentials.from_service_account_file(
+                service_account_file, scopes=SCOPES
+            )
+            service = build('sheets', 'v4', credentials=credentials)
+            _service_cache[service_account_file] = service
+            return service
+        except Exception as e:
+            raise ValueError(f"Invalid service account file: {e}")
 
 
 def list_tabs(spreadsheet_id: str, service=None, service_account_file: Optional[str] = None) -> List[str]:
@@ -221,9 +232,12 @@ def _has_target_background_color(cell: dict) -> bool:
     return False
 
 
+_write_lock = threading.Lock()
+
+
 def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: str, url: str, service=None, service_account_file: Optional[str] = None) -> None:
     """
-    Write a PSI URL to a specific cell in the spreadsheet.
+    Write a PSI URL to a specific cell in the spreadsheet (thread-safe).
     
     Args:
         spreadsheet_id: The ID of the Google Spreadsheet
@@ -239,24 +253,25 @@ def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: st
             raise ValueError("Either service or service_account_file must be provided")
         service = authenticate(service_account_file)
     
-    sheet = service.spreadsheets()
-    range_name = f"{tab_name}!{column}{row_index}"
-    
-    body = {
-        'values': [[url]]
-    }
-    
-    sheet.values().update(
-        spreadsheetId=spreadsheet_id,
-        range=range_name,
-        valueInputOption='RAW',
-        body=body
-    ).execute()
+    with _write_lock:
+        sheet = service.spreadsheets()
+        range_name = f"{tab_name}!{column}{row_index}"
+        
+        body = {
+            'values': [[url]]
+        }
+        
+        sheet.values().update(
+            spreadsheetId=spreadsheet_id,
+            range=range_name,
+            valueInputOption='RAW',
+            body=body
+        ).execute()
 
 
 def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple[int, str, str]], service=None, service_account_file: Optional[str] = None) -> None:
     """
-    Batch write PSI URLs to multiple cells in the spreadsheet.
+    Batch write PSI URLs to multiple cells in the spreadsheet (thread-safe).
     
     Args:
         spreadsheet_id: The ID of the Google Spreadsheet
@@ -273,22 +288,23 @@ def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple
             raise ValueError("Either service or service_account_file must be provided")
         service = authenticate(service_account_file)
     
-    sheet = service.spreadsheets()
-    
-    data = []
-    for row_index, column, url in updates:
-        range_name = f"{tab_name}!{column}{row_index}"
-        data.append({
-            'range': range_name,
-            'values': [[url]]
-        })
-    
-    body = {
-        'valueInputOption': 'RAW',
-        'data': data
-    }
-    
-    sheet.values().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body=body
-    ).execute()
+    with _write_lock:
+        sheet = service.spreadsheets()
+        
+        data = []
+        for row_index, column, url in updates:
+            range_name = f"{tab_name}!{column}{row_index}"
+            data.append({
+                'range': range_name,
+                'values': [[url]]
+            })
+        
+        body = {
+            'valueInputOption': 'RAW',
+            'data': data
+        }
+        
+        sheet.values().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body=body
+        ).execute()

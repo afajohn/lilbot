@@ -2,7 +2,10 @@
 import argparse
 import sys
 import os
-from typing import List, Tuple
+import signal
+import threading
+from typing import List, Tuple, Dict, Any, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
 
@@ -16,6 +19,176 @@ SERVICE_ACCOUNT_FILE = 'service-account.json'
 MOBILE_COLUMN = 'F'
 DESKTOP_COLUMN = 'G'
 SCORE_THRESHOLD = 80
+DEFAULT_CONCURRENCY = 3
+
+
+shutdown_event = threading.Event()
+log_lock = threading.Lock()
+
+
+def signal_handler(signum, frame):
+    """Handle SIGINT and SIGTERM signals for graceful shutdown."""
+    with log_lock:
+        log = logger.get_logger()
+        log.info("\nReceived shutdown signal. Waiting for current tasks to complete...")
+    shutdown_event.set()
+
+
+def process_url(
+    url_data: Tuple[int, str, Optional[str], Optional[str], bool],
+    spreadsheet_id: str,
+    tab_name: str,
+    service,
+    timeout: int,
+    total_urls: int,
+    processed_count: dict
+) -> Dict[str, Any]:
+    """
+    Process a single URL with thread-safe logging.
+    
+    Args:
+        url_data: Tuple of (row_index, url, existing_mobile_psi, existing_desktop_psi, should_skip)
+        spreadsheet_id: Google Sheets spreadsheet ID
+        tab_name: Sheet tab name
+        service: Shared Google Sheets service
+        timeout: Cypress timeout in seconds
+        total_urls: Total number of URLs to process
+        processed_count: Shared counter dictionary with lock
+        
+    Returns:
+        Dictionary with result data
+    """
+    log = logger.get_logger()
+    row_index, url, existing_mobile_psi, existing_desktop_psi, should_skip = url_data
+    
+    if shutdown_event.is_set():
+        return {
+            'row': row_index,
+            'url': url,
+            'skipped': True,
+            'shutdown': True
+        }
+    
+    with processed_count['lock']:
+        processed_count['count'] += 1
+        current_idx = processed_count['count']
+    
+    if should_skip:
+        with log_lock:
+            log.info(f"[{current_idx}/{total_urls}] Skipping {url} (contains 'passed' or has green background in column F or G)")
+            log.info("")
+        return {
+            'row': row_index,
+            'url': url,
+            'skipped': True
+        }
+    
+    if existing_mobile_psi and existing_desktop_psi:
+        with log_lock:
+            log.info(f"[{current_idx}/{total_urls}] Skipping {url} (both columns F and G already filled)")
+            log.info("")
+        return {
+            'row': row_index,
+            'url': url,
+            'skipped': True
+        }
+    
+    with log_lock:
+        log.info(f"[{current_idx}/{total_urls}] Analyzing {url}...")
+        if existing_mobile_psi:
+            log.info(f"  Mobile PSI URL already exists (column F filled), will only update desktop")
+        if existing_desktop_psi:
+            log.info(f"  Desktop PSI URL already exists (column G filled), will only update mobile")
+    
+    try:
+        result = cypress_runner.run_analysis(url, timeout=timeout)
+        
+        mobile_score = result.get('mobile_score')
+        desktop_score = result.get('desktop_score')
+        mobile_psi_url = result.get('mobile_psi_url')
+        desktop_psi_url = result.get('desktop_psi_url')
+        
+        mobile_status = "PASS" if mobile_score is not None and mobile_score >= SCORE_THRESHOLD else "FAIL"
+        desktop_status = "PASS" if desktop_score is not None and desktop_score >= SCORE_THRESHOLD else "FAIL"
+        
+        with log_lock:
+            log.info(f"  Mobile: {mobile_score if mobile_score is not None else 'N/A'} ({mobile_status})")
+            log.info(f"  Desktop: {desktop_score if desktop_score is not None else 'N/A'} ({desktop_status})")
+        
+        updates = []
+        
+        if not existing_mobile_psi and mobile_score is not None:
+            if mobile_score >= SCORE_THRESHOLD:
+                updates.append((row_index, MOBILE_COLUMN, 'passed'))
+            elif mobile_psi_url:
+                updates.append((row_index, MOBILE_COLUMN, mobile_psi_url))
+        
+        if not existing_desktop_psi and desktop_score is not None:
+            if desktop_score >= SCORE_THRESHOLD:
+                updates.append((row_index, DESKTOP_COLUMN, 'passed'))
+            elif desktop_psi_url:
+                updates.append((row_index, DESKTOP_COLUMN, desktop_psi_url))
+        
+        if updates:
+            try:
+                sheets_client.batch_write_psi_urls(
+                    spreadsheet_id,
+                    tab_name,
+                    updates,
+                    service=service
+                )
+                with log_lock:
+                    log.info(f"  Updated spreadsheet with {len(updates)} value(s)")
+            except Exception as e:
+                with log_lock:
+                    log.error(f"  WARNING: Failed to update spreadsheet: {e}")
+        
+        with log_lock:
+            log.info(f"Successfully analyzed {url}")
+            log.info("")
+        
+        return {
+            'row': row_index,
+            'url': url,
+            'mobile_score': mobile_score,
+            'desktop_score': desktop_score,
+            'mobile_psi_url': mobile_psi_url,
+            'desktop_psi_url': desktop_psi_url
+        }
+        
+    except cypress_runner.CypressTimeoutError as e:
+        error_msg = f"Timeout - {e}"
+        with log_lock:
+            log.error(f"  ERROR: {error_msg}")
+            log.error(f"Failed to analyze {url} due to timeout", exc_info=True)
+            log.info("")
+        return {
+            'row': row_index,
+            'url': url,
+            'error': str(e)
+        }
+    except cypress_runner.CypressRunnerError as e:
+        error_msg = f"Cypress failed - {e}"
+        with log_lock:
+            log.error(f"  ERROR: {error_msg}")
+            log.error(f"Failed to analyze {url} due to Cypress error", exc_info=True)
+            log.info("")
+        return {
+            'row': row_index,
+            'url': url,
+            'error': str(e)
+        }
+    except Exception as e:
+        error_msg = f"Unexpected error - {e}"
+        with log_lock:
+            log.error(f"  ERROR: {error_msg}")
+            log.error(f"Failed to analyze {url} due to unexpected error", exc_info=True)
+            log.info("")
+        return {
+            'row': row_index,
+            'url': url,
+            'error': str(e)
+        }
 
 
 def main():
@@ -43,8 +216,21 @@ def main():
         default=600,
         help='Timeout in seconds for each Cypress run (default: 600)'
     )
+    parser.add_argument(
+        '--concurrency',
+        type=int,
+        default=DEFAULT_CONCURRENCY,
+        help=f'Number of concurrent workers (default: {DEFAULT_CONCURRENCY}, range: 1-5)'
+    )
     
     args = parser.parse_args()
+    
+    if args.concurrency < 1 or args.concurrency > 5:
+        print("Error: --concurrency must be between 1 and 5")
+        sys.exit(1)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     log = logger.setup_logger()
     
@@ -90,120 +276,51 @@ def main():
         log.info("No URLs found in the spreadsheet.")
         sys.exit(0)
     
-    log.info(f"Found {len(urls)} URLs to analyze.\n")
+    log.info(f"Found {len(urls)} URLs to analyze.")
+    log.info(f"Using {args.concurrency} concurrent workers.\n")
     
+    processed_count = {'count': 0, 'lock': threading.Lock()}
     results = []
-    skipped_count = 0
     
-    for idx, (row_index, url, existing_mobile_psi, existing_desktop_psi, should_skip) in enumerate(urls, start=1):
-        if should_skip:
-            log.info(f"[{idx}/{len(urls)}] Skipping {url} (contains 'passed' or has green background in column F or G)")
-            skipped_count += 1
-            results.append({
-                'row': row_index,
-                'url': url,
-                'skipped': True
-            })
-            log.info("")
-            continue
-        
-        if existing_mobile_psi and existing_desktop_psi:
-            log.info(f"[{idx}/{len(urls)}] Skipping {url} (both columns F and G already filled)")
-            skipped_count += 1
-            results.append({
-                'row': row_index,
-                'url': url,
-                'skipped': True
-            })
-            log.info("")
-            continue
-        
-        log.info(f"[{idx}/{len(urls)}] Analyzing {url}...")
-        if existing_mobile_psi:
-            log.info(f"  Mobile PSI URL already exists (column F filled), will only update desktop")
-        if existing_desktop_psi:
-            log.info(f"  Desktop PSI URL already exists (column G filled), will only update mobile")
+    with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+        futures = {
+            executor.submit(
+                process_url,
+                url_data,
+                args.spreadsheet_id,
+                args.tab,
+                service,
+                args.timeout,
+                len(urls),
+                processed_count
+            ): url_data for url_data in urls
+        }
         
         try:
-            result = cypress_runner.run_analysis(url, timeout=args.timeout)
-            
-            mobile_score = result.get('mobile_score')
-            desktop_score = result.get('desktop_score')
-            mobile_psi_url = result.get('mobile_psi_url')
-            desktop_psi_url = result.get('desktop_psi_url')
-            
-            mobile_status = "PASS" if mobile_score is not None and mobile_score >= SCORE_THRESHOLD else "FAIL"
-            desktop_status = "PASS" if desktop_score is not None and desktop_score >= SCORE_THRESHOLD else "FAIL"
-            
-            log.info(f"  Mobile: {mobile_score if mobile_score is not None else 'N/A'} ({mobile_status})")
-            log.info(f"  Desktop: {desktop_score if desktop_score is not None else 'N/A'} ({desktop_status})")
-            
-            results.append({
-                'row': row_index,
-                'url': url,
-                'mobile_score': mobile_score,
-                'desktop_score': desktop_score,
-                'mobile_psi_url': mobile_psi_url,
-                'desktop_psi_url': desktop_psi_url
-            })
-            
-            updates = []
-            
-            if not existing_mobile_psi and mobile_score is not None:
-                if mobile_score >= SCORE_THRESHOLD:
-                    updates.append((row_index, MOBILE_COLUMN, 'passed'))
-                elif mobile_psi_url:
-                    updates.append((row_index, MOBILE_COLUMN, mobile_psi_url))
-            
-            if not existing_desktop_psi and desktop_score is not None:
-                if desktop_score >= SCORE_THRESHOLD:
-                    updates.append((row_index, DESKTOP_COLUMN, 'passed'))
-                elif desktop_psi_url:
-                    updates.append((row_index, DESKTOP_COLUMN, desktop_psi_url))
-            
-            if updates:
+            for future in as_completed(futures):
+                if shutdown_event.is_set():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    log.info("Shutdown requested. Cancelling remaining tasks...")
+                    break
+                
                 try:
-                    sheets_client.batch_write_psi_urls(
-                        args.spreadsheet_id,
-                        args.tab,
-                        updates,
-                        service=service
-                    )
-                    log.info(f"  Updated spreadsheet with {len(updates)} value(s)")
+                    result = future.result()
+                    results.append(result)
                 except Exception as e:
-                    log.error(f"  WARNING: Failed to update spreadsheet: {e}")
-            
-            log.info(f"Successfully analyzed {url}")
-            
-        except cypress_runner.CypressTimeoutError as e:
-            error_msg = f"Timeout - {e}"
-            log.error(f"  ERROR: {error_msg}")
-            log.error(f"Failed to analyze {url} due to timeout", exc_info=True)
-            results.append({
-                'row': row_index,
-                'url': url,
-                'error': str(e)
-            })
-        except cypress_runner.CypressRunnerError as e:
-            error_msg = f"Cypress failed - {e}"
-            log.error(f"  ERROR: {error_msg}")
-            log.error(f"Failed to analyze {url} due to Cypress error", exc_info=True)
-            results.append({
-                'row': row_index,
-                'url': url,
-                'error': str(e)
-            })
-        except Exception as e:
-            error_msg = f"Unexpected error - {e}"
-            log.error(f"  ERROR: {error_msg}")
-            log.error(f"Failed to analyze {url} due to unexpected error", exc_info=True)
-            results.append({
-                'row': row_index,
-                'url': url,
-                'error': str(e)
-            })
-        
-        log.info("")
+                    url_data = futures[future]
+                    with log_lock:
+                        log.error(f"Unexpected error processing {url_data[1]}: {e}", exc_info=True)
+                    results.append({
+                        'row': url_data[0],
+                        'url': url_data[1],
+                        'error': str(e)
+                    })
+        except KeyboardInterrupt:
+            executor.shutdown(wait=False, cancel_futures=True)
+            log.info("Keyboard interrupt received. Shutting down...")
+    
+    if shutdown_event.is_set():
+        log.info("\nAudit interrupted by user. Partial results below.\n")
     
     log.info("=" * 80)
     log.info("AUDIT SUMMARY")
@@ -219,7 +336,7 @@ def main():
     desktop_pass = sum(1 for r in results if r.get('desktop_score') is not None and r['desktop_score'] >= SCORE_THRESHOLD)
     desktop_fail = sum(1 for r in results if r.get('desktop_score') is not None and r['desktop_score'] < SCORE_THRESHOLD)
     
-    log.info(f"Total URLs found: {total_urls}")
+    log.info(f"Total URLs processed: {total_urls}")
     log.info(f"URLs skipped: {skipped}")
     log.info(f"URLs analyzed: {analyzed}")
     log.info(f"Failed analyses: {failed}")
