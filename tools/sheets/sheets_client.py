@@ -3,6 +3,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from typing import List, Tuple, Optional
 import threading
+import time
 
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -10,6 +11,80 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 _auth_lock = threading.Lock()
 _service_cache = {}
+
+
+class RateLimiter:
+    """Token bucket rate limiter for Google Sheets API calls."""
+    
+    def __init__(self, max_tokens: int = 90, refill_period: float = 100.0):
+        """
+        Initialize rate limiter with token bucket algorithm.
+        
+        Args:
+            max_tokens: Maximum number of tokens (requests) allowed
+            refill_period: Time period in seconds for refilling tokens
+        """
+        self.max_tokens = max_tokens
+        self.tokens = max_tokens
+        self.refill_period = refill_period
+        self.refill_rate = max_tokens / refill_period
+        self.last_refill = time.time()
+        self.lock = threading.Lock()
+    
+    def acquire(self, tokens: int = 1) -> None:
+        """
+        Acquire tokens, blocking if necessary until tokens are available.
+        
+        Args:
+            tokens: Number of tokens to acquire
+        """
+        with self.lock:
+            while True:
+                now = time.time()
+                elapsed = now - self.last_refill
+                self.tokens = min(self.max_tokens, self.tokens + elapsed * self.refill_rate)
+                self.last_refill = now
+                
+                if self.tokens >= tokens:
+                    self.tokens -= tokens
+                    return
+                
+                wait_time = (tokens - self.tokens) / self.refill_rate
+                time.sleep(min(wait_time, 1.0))
+
+
+_rate_limiter = RateLimiter(max_tokens=90, refill_period=100.0)
+
+
+def _execute_with_retry(func, max_retries: int = 3, initial_delay: float = 2.0):
+    """
+    Execute a function with exponential backoff retry logic.
+    
+    Args:
+        func: Callable to execute
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay in seconds (doubles with each retry)
+        
+    Returns:
+        Result of the function call
+        
+    Raises:
+        Last exception if all retries fail
+    """
+    delay = initial_delay
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            _rate_limiter.acquire()
+            return func()
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+                delay *= 2
+    
+    raise last_exception
 
 
 def authenticate(service_account_file: str):
@@ -67,11 +142,14 @@ def list_tabs(spreadsheet_id: str, service=None, service_account_file: Optional[
             raise ValueError("Either service or service_account_file must be provided")
         service = authenticate(service_account_file)
     
-    try:
+    def _list():
         sheet = service.spreadsheets()
         spreadsheet = sheet.get(spreadsheetId=spreadsheet_id).execute()
         sheets = spreadsheet.get('sheets', [])
         return [s['properties']['title'] for s in sheets]
+    
+    try:
+        return _execute_with_retry(_list)
     except HttpError as e:
         if e.resp.status == 404:
             raise ValueError(
@@ -93,6 +171,7 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
     """
     Read URLs from column A of a spreadsheet tab, starting from row 2 (skipping header).
     Also reads existing PSI URLs from columns F and G and checks for skip conditions.
+    Reads all data (A:G) in a single API call.
     
     Args:
         spreadsheet_id: The ID of the Google Spreadsheet
@@ -117,7 +196,7 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
     sheet = service.spreadsheets()
     range_name = f"{tab_name}!A2:G"
     
-    try:
+    def _read():
         result = sheet.values().get(
             spreadsheetId=spreadsheet_id,
             range=range_name
@@ -128,6 +207,11 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
             ranges=[range_name],
             fields='sheets(data(rowData(values(effectiveFormat(backgroundColor),formattedValue))))'
         ).execute()
+        
+        return result, spreadsheet_data
+    
+    try:
+        result, spreadsheet_data = _execute_with_retry(_read)
     except HttpError as e:
         if e.resp.status == 404:
             available_tabs = list_tabs(spreadsheet_id, service=service)
@@ -261,17 +345,21 @@ def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: st
             'values': [[url]]
         }
         
-        sheet.values().update(
-            spreadsheetId=spreadsheet_id,
-            range=range_name,
-            valueInputOption='RAW',
-            body=body
-        ).execute()
+        def _write():
+            return sheet.values().update(
+                spreadsheetId=spreadsheet_id,
+                range=range_name,
+                valueInputOption='RAW',
+                body=body
+            ).execute()
+        
+        _execute_with_retry(_write)
 
 
 def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple[int, str, str]], service=None, service_account_file: Optional[str] = None) -> None:
     """
     Batch write PSI URLs to multiple cells in the spreadsheet (thread-safe).
+    Writes in chunks of 100 cells with retry and exponential backoff.
     
     Args:
         spreadsheet_id: The ID of the Google Spreadsheet
@@ -291,20 +379,27 @@ def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple
     with _write_lock:
         sheet = service.spreadsheets()
         
-        data = []
-        for row_index, column, url in updates:
-            range_name = f"{tab_name}!{column}{row_index}"
-            data.append({
-                'range': range_name,
-                'values': [[url]]
-            })
-        
-        body = {
-            'valueInputOption': 'RAW',
-            'data': data
-        }
-        
-        sheet.values().batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            body=body
-        ).execute()
+        chunk_size = 100
+        for i in range(0, len(updates), chunk_size):
+            chunk = updates[i:i + chunk_size]
+            
+            data = []
+            for row_index, column, url in chunk:
+                range_name = f"{tab_name}!{column}{row_index}"
+                data.append({
+                    'range': range_name,
+                    'values': [[url]]
+                })
+            
+            body = {
+                'valueInputOption': 'RAW',
+                'data': data
+            }
+            
+            def _batch_write():
+                return sheet.values().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body=body
+                ).execute()
+            
+            _execute_with_retry(_batch_write)
