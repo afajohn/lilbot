@@ -75,6 +75,15 @@ python run_audit.py --tab "TAB_NAME" --force-retry
 python validate_service_account.py service-account.json
 ```
 
+**Validate Skip Logic:**
+```bash
+# Test skip logic with all scenarios
+python validate_skip_logic.py
+
+# Generate test spreadsheet scenarios for debugging
+python generate_test_spreadsheet_scenarios.py
+```
+
 **Query Audit Trail:**
 ```bash
 # View all modifications
