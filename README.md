@@ -8,6 +8,7 @@ Automated tool for running PageSpeed Insights audits on URLs from Google Sheets 
 - **[INSTALL.md](INSTALL.md)** - Detailed installation guide
 - **[README.md](README.md)** - Full documentation (this file)
 - **[AGENTS.md](AGENTS.md)** - Developer guide
+- **[CACHE_GUIDE.md](CACHE_GUIDE.md)** - Caching configuration and usage
 - **[PERFORMANCE_OPTIMIZATIONS.md](PERFORMANCE_OPTIMIZATIONS.md)** - Performance improvements and benchmarks
 
 ## Overview
@@ -28,6 +29,7 @@ This tool reads URLs from a Google Spreadsheet, analyzes each URL using PageSpee
 **Key Features:**
 - ✅ Batch process URLs from Google Sheets
 - ✅ Automated PageSpeed Insights analysis via Cypress
+- ✅ **Result caching with Redis/file backend (24-hour TTL)**
 - ✅ Real-time progress tracking with incremental spreadsheet updates
 - ✅ Automatic retry on transient failures
 - ✅ Comprehensive logging
@@ -123,6 +125,8 @@ python run_audit.py --tab "Barranquilla Singles" --service-account "service-acco
 | `--spreadsheet-id` | No | `1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I` | Google Spreadsheet ID |
 | `--service-account` | No | `service-account.json` | Path to service account JSON file |
 | `--timeout` | No | `600` | Timeout in seconds for each URL analysis |
+| `--concurrency` | No | `3` | Number of concurrent workers (1-5) |
+| `--skip-cache` | No | `False` | Skip cache and force fresh analysis |
 
 ### Examples
 
@@ -146,12 +150,38 @@ python run_audit.py --tab "Website 1" --service-account "C:\path\to\credentials.
 python run_audit.py --tab "Website 1" --timeout 900
 ```
 
+**Skip cache for fresh analysis:**
+```bash
+python run_audit.py --tab "Website 1" --skip-cache
+```
+
+**Use multiple concurrent workers:**
+```bash
+python run_audit.py --tab "Website 1" --concurrency 5
+```
+
 ### List Available Tabs
 
 To see all available tabs in your spreadsheet:
 ```bash
 python list_tabs.py --spreadsheet-id "YOUR_SPREADSHEET_ID" --service-account "service-account.json"
 ```
+
+### Cache Management
+
+The tool caches PageSpeed Insights results for 24 hours to improve performance:
+
+**Invalidate cache for a specific URL:**
+```bash
+python invalidate_cache.py --url "https://example.com"
+```
+
+**Clear all cached results:**
+```bash
+python invalidate_cache.py --all
+```
+
+**Note**: By default, the tool uses a file-based cache in `.cache/` directory. For production use with Redis, see [CACHE_GUIDE.md](CACHE_GUIDE.md).
 
 ## Google Sheets Format
 

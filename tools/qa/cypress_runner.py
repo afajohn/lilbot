@@ -12,6 +12,7 @@ from tools.utils.exceptions import RetryableError, PermanentError
 from tools.utils.circuit_breaker import CircuitBreaker
 from tools.utils.error_metrics import get_global_metrics
 from tools.utils.logger import get_logger
+from tools.cache.cache_manager import get_cache_manager
 
 
 class CypressRunnerError(Exception):
@@ -70,15 +71,16 @@ def _find_npx() -> str:
     )
 
 
-def run_analysis(url: str, timeout: int = 600, max_retries: int = 3) -> Dict[str, Optional[int | str]]:
+def run_analysis(url: str, timeout: int = 600, max_retries: int = 3, skip_cache: bool = False) -> Dict[str, Optional[int | str]]:
     """
     Run Cypress analysis for a given URL to get PageSpeed Insights scores.
-    Includes circuit breaker protection and error metrics collection.
+    Includes circuit breaker protection, error metrics collection, and caching.
     
     Args:
         url: The URL to analyze
         timeout: Maximum time in seconds to wait for Cypress to complete (default: 600)
         max_retries: Maximum number of retry attempts for transient errors (default: 3)
+        skip_cache: If True, bypass cache and force fresh analysis (default: False)
         
     Returns:
         Dictionary with keys:
@@ -95,6 +97,14 @@ def run_analysis(url: str, timeout: int = 600, max_retries: int = 3) -> Dict[str
     metrics = get_global_metrics()
     metrics.increment_total_operations()
     logger = get_logger()
+    cache_manager = get_cache_manager(enabled=not skip_cache)
+    
+    if not skip_cache:
+        cached_result = cache_manager.get(url)
+        if cached_result:
+            logger.info(f"Using cached result for {url}")
+            metrics.record_success('run_analysis', was_retried=False)
+            return cached_result
     
     last_exception = None
     was_retried = False
@@ -103,6 +113,10 @@ def run_analysis(url: str, timeout: int = 600, max_retries: int = 3) -> Dict[str
         try:
             result = _run_analysis_once(url, timeout)
             metrics.record_success('run_analysis', was_retried=was_retried)
+            
+            if not skip_cache:
+                cache_manager.set(url, result)
+            
             return result
             
         except PermanentError:

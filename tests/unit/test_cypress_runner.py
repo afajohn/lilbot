@@ -41,15 +41,21 @@ class TestFindNpx:
     
     @patch('shutil.which')
     def test_find_npx_not_found(self, mock_which):
+        from tools.utils.exceptions import PermanentError
         mock_which.return_value = None
         
-        with pytest.raises(cypress_runner.CypressRunnerError, match="npx not found"):
+        with pytest.raises(PermanentError, match="npx not found"):
             cypress_runner._find_npx()
 
 
 class TestRunAnalysis:
+    @patch('qa.cypress_runner.get_cache_manager')
     @patch('qa.cypress_runner._run_analysis_once')
-    def test_run_analysis_success_first_try(self, mock_run_once):
+    def test_run_analysis_success_first_try(self, mock_run_once, mock_cache_mgr):
+        mock_cache = Mock()
+        mock_cache.get.return_value = None
+        mock_cache_mgr.return_value = mock_cache
+        
         mock_run_once.return_value = {
             'mobile_score': 85,
             'desktop_score': 90,
@@ -63,9 +69,14 @@ class TestRunAnalysis:
         assert result['desktop_score'] == 90
         assert mock_run_once.call_count == 1
     
+    @patch('qa.cypress_runner.get_cache_manager')
     @patch('qa.cypress_runner._run_analysis_once')
     @patch('time.sleep')
-    def test_run_analysis_retry_success(self, mock_sleep, mock_run_once):
+    def test_run_analysis_retry_success(self, mock_sleep, mock_run_once, mock_cache_mgr):
+        mock_cache = Mock()
+        mock_cache.get.return_value = None
+        mock_cache_mgr.return_value = mock_cache
+        
         mock_run_once.side_effect = [
             cypress_runner.CypressRunnerError("Transient error"),
             {
@@ -82,9 +93,14 @@ class TestRunAnalysis:
         assert mock_run_once.call_count == 2
         mock_sleep.assert_called_once_with(5)
     
+    @patch('qa.cypress_runner.get_cache_manager')
     @patch('qa.cypress_runner._run_analysis_once')
     @patch('time.sleep')
-    def test_run_analysis_max_retries_exceeded(self, mock_sleep, mock_run_once):
+    def test_run_analysis_max_retries_exceeded(self, mock_sleep, mock_run_once, mock_cache_mgr):
+        mock_cache = Mock()
+        mock_cache.get.return_value = None
+        mock_cache_mgr.return_value = mock_cache
+        
         mock_run_once.side_effect = cypress_runner.CypressRunnerError("Persistent error")
         
         with pytest.raises(cypress_runner.CypressRunnerError, match="Persistent error"):
@@ -93,8 +109,13 @@ class TestRunAnalysis:
         assert mock_run_once.call_count == 3
         assert mock_sleep.call_count == 2
     
+    @patch('qa.cypress_runner.get_cache_manager')
     @patch('qa.cypress_runner._run_analysis_once')
-    def test_run_analysis_timeout_no_retry(self, mock_run_once):
+    def test_run_analysis_timeout_no_retry(self, mock_run_once, mock_cache_mgr):
+        mock_cache = Mock()
+        mock_cache.get.return_value = None
+        mock_cache_mgr.return_value = mock_cache
+        
         mock_run_once.side_effect = cypress_runner.CypressTimeoutError("Timeout")
         
         with pytest.raises(cypress_runner.CypressTimeoutError):
@@ -191,6 +212,7 @@ class TestRunAnalysisOnce:
     @patch('os.makedirs')
     @patch('glob.glob')
     def test_run_analysis_once_no_results_file(self, mock_glob, mock_makedirs, mock_subprocess, mock_find_npx):
+        from tools.utils.exceptions import RetryableError
         mock_find_npx.return_value = '/usr/bin/npx'
         
         mock_subprocess.return_value = Mock(
@@ -201,7 +223,7 @@ class TestRunAnalysisOnce:
         
         mock_glob.side_effect = [[], []]
         
-        with pytest.raises(FileNotFoundError, match="No new results file found"):
+        with pytest.raises(RetryableError, match="No new results file found"):
             cypress_runner._run_analysis_once('https://example.com', 600)
     
     @patch('qa.cypress_runner._find_npx')
@@ -273,11 +295,14 @@ class TestRunAnalysisOnce:
             with pytest.raises(cypress_runner.CypressRunnerError, match="missing score data"):
                 cypress_runner._run_analysis_once('https://example.com', 600)
     
+    @patch('qa.cypress_runner._get_circuit_breaker')
     @patch('qa.cypress_runner._find_npx')
     @patch('subprocess.run')
     @patch('os.makedirs')
     @patch('os.environ', {})
-    def test_run_analysis_once_sets_environment(self, mock_makedirs, mock_subprocess, mock_find_npx):
+    def test_run_analysis_once_sets_environment(self, mock_makedirs, mock_subprocess, mock_find_npx, mock_get_cb):
+        mock_cb = Mock()
+        mock_get_cb.return_value = mock_cb
         mock_find_npx.return_value = '/usr/bin/npx'
         
         captured_env = {}
@@ -286,6 +311,13 @@ class TestRunAnalysisOnce:
             captured_env.update(kwargs.get('env', {}))
             raise subprocess.TimeoutExpired('npx', 1)
         
+        def mock_call(func):
+            try:
+                return func()
+            except subprocess.TimeoutExpired as e:
+                raise cypress_runner.CypressTimeoutError(f"Cypress execution exceeded 1 seconds timeout") from e
+        
+        mock_cb.call.side_effect = mock_call
         mock_subprocess.side_effect = capture_env
         
         try:

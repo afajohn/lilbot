@@ -44,7 +44,8 @@ def process_url(
     service,
     timeout: int,
     total_urls: int,
-    processed_count: dict
+    processed_count: dict,
+    skip_cache: bool = False
 ) -> Dict[str, Any]:
     """
     Process a single URL with thread-safe logging and error metrics collection.
@@ -57,6 +58,7 @@ def process_url(
         timeout: Cypress timeout in seconds
         total_urls: Total number of URLs to process
         processed_count: Shared counter dictionary with lock
+        skip_cache: If True, bypass cache and force fresh analysis
         
     Returns:
         Dictionary with result data
@@ -103,9 +105,11 @@ def process_url(
             log.info(f"  Mobile PSI URL already exists (column F filled), will only update desktop")
         if existing_desktop_psi:
             log.info(f"  Desktop PSI URL already exists (column G filled), will only update mobile")
+        if skip_cache:
+            log.info(f"  Cache disabled for this analysis")
     
     try:
-        result = cypress_runner.run_analysis(url, timeout=timeout)
+        result = cypress_runner.run_analysis(url, timeout=timeout, skip_cache=skip_cache)
         
         mobile_score = result.get('mobile_score')
         desktop_score = result.get('desktop_score')
@@ -344,6 +348,11 @@ def main():
         default=DEFAULT_CONCURRENCY,
         help=f'Number of concurrent workers (default: {DEFAULT_CONCURRENCY}, range: 1-5)'
     )
+    parser.add_argument(
+        '--skip-cache',
+        action='store_true',
+        help='Skip cache and force fresh analysis for all URLs'
+    )
     
     args = parser.parse_args()
     
@@ -407,7 +416,10 @@ def main():
         sys.exit(0)
     
     log.info(f"Found {len(urls)} URLs to analyze.")
-    log.info(f"Using {args.concurrency} concurrent workers.\n")
+    log.info(f"Using {args.concurrency} concurrent workers.")
+    if args.skip_cache:
+        log.info("Cache is disabled (--skip-cache flag)")
+    log.info("")
     
     processed_count = {'count': 0, 'lock': threading.Lock()}
     results = []
@@ -422,7 +434,8 @@ def main():
                 service,
                 args.timeout,
                 len(urls),
-                processed_count
+                processed_count,
+                args.skip_cache
             ): url_data for url_data in urls
         }
         

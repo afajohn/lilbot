@@ -24,8 +24,18 @@ python list_tabs.py --spreadsheet-id "YOUR_ID" --service-account "service-accoun
 **Run Audit:**
 ```bash
 python run_audit.py --tab "TAB_NAME" --service-account "service-account.json"
-# Optional: Specify custom timeout (default: 900 seconds)
+# Optional: Specify custom timeout (default: 600 seconds)
 python run_audit.py --tab "TAB_NAME" --timeout 1200
+# Optional: Skip cache for fresh analysis
+python run_audit.py --tab "TAB_NAME" --skip-cache
+```
+
+**Cache Management:**
+```bash
+# Invalidate specific URL cache
+python invalidate_cache.py --url "https://example.com"
+# Clear all cache entries
+python invalidate_cache.py --all
 ```
 
 **Build:** Not applicable (Python script)
@@ -51,21 +61,24 @@ python -m pytest  # Or use run_tests.ps1 (Windows) or ./run_tests.sh (Unix)
 - **Language**: Python 3.7+
 - **Browser Automation**: Cypress (JavaScript/Node.js)
 - **APIs**: Google Sheets API v4
+- **Caching**: Redis (with file-based fallback)
 - **Key Libraries**:
   - `google-api-python-client` - Google Sheets integration
   - `google-auth` - Authentication
+  - `redis` - Redis caching backend (optional)
   - Cypress - Browser automation for PageSpeed Insights
 
 ## Performance Optimizations
 
 The system has been optimized for faster URL processing:
 
-1. **Reduced Timeouts**: Default timeout reduced from 900s to 600s with optimized Cypress timeouts
-2. **Fewer Retries**: Cypress retries reduced from 5 to 2, Python retries from 10 to 3
-3. **Faster Waits**: Inter-action waits reduced from 5-15s to 2s
-4. **Incremental Updates**: Spreadsheet updates happen immediately after each URL (not batched at end)
-5. **Explicit Headless Mode**: Cypress runs in headless mode with explicit flags
-6. **Optimized Analysis**: PageSpeed Insights runs once, then switches between Mobile/Desktop views
+1. **Result Caching**: Redis/file-based cache with 24-hour TTL and LRU eviction (1000 entries max)
+2. **Reduced Timeouts**: Default timeout reduced from 900s to 600s with optimized Cypress timeouts
+3. **Fewer Retries**: Cypress retries reduced from 5 to 2, Python retries from 10 to 3
+4. **Faster Waits**: Inter-action waits reduced from 5-15s to 2s
+5. **Incremental Updates**: Spreadsheet updates happen immediately after each URL (not batched at end)
+6. **Explicit Headless Mode**: Cypress runs in headless mode with explicit flags
+7. **Optimized Analysis**: PageSpeed Insights runs once, then switches between Mobile/Desktop views
 
 **Key Issue Resolved**: Running `npx cypress open` while `run_audit.py` is executing blocks the headless Cypress instance. Always close the Cypress UI before running audits.
 
@@ -79,17 +92,21 @@ The system has been optimized for faster URL processing:
 ├── list_tabs.py              # Utility to list spreadsheet tabs
 ├── get_service_account_email.py  # Utility to get service account email
 ├── validate_setup.py         # Setup validation script
+├── invalidate_cache.py       # Cache invalidation utility
 ├── tools/
 │   ├── sheets/
 │   │   └── sheets_client.py  # Google Sheets API wrapper
 │   ├── qa/
 │   │   └── cypress_runner.py # Cypress automation wrapper
+│   ├── cache/
+│   │   └── cache_manager.py  # Cache layer (Redis + file backend)
 │   └── utils/
 │       └── logger.py         # Logging utilities
-└── cypress/
-    ├── e2e/
-    │   └── analyze-url.cy.js # PageSpeed Insights test automation
-    └── results/              # Generated JSON results (gitignored)
+├── cypress/
+│   ├── e2e/
+│   │   └── analyze-url.cy.js # PageSpeed Insights test automation
+│   └── results/              # Generated JSON results (gitignored)
+└── .cache/                   # File cache storage (gitignored)
 ```
 
 ### Data Flow
@@ -97,7 +114,9 @@ The system has been optimized for faster URL processing:
 1. **Input**: URLs from Google Sheets column A (starting row 2)
 2. **Processing**:
    - `run_audit.py` reads URLs via `sheets_client.py`
-   - For each URL, `cypress_runner.py` launches Cypress (retries up to 3 times on failure)
+   - For each URL, `cypress_runner.py` checks cache first (unless `--skip-cache`)
+   - On cache miss, launches Cypress (retries up to 3 times on failure)
+   - Results are cached with 24-hour TTL for future runs
    - Cypress navigates to PageSpeed Insights and extracts scores from `.lh-exp-gauge__percentage`
    - Results saved to JSON files in `cypress/results/`
    - **Incremental updates**: Spreadsheet is updated immediately after each URL is analyzed (not batched at the end)
@@ -204,7 +223,13 @@ Cypress runs can fail transiently. The system has multiple layers of retry:
 - Default timeout: 600 seconds (can be overridden with --timeout flag)
 
 ### Environment Variables
-Not currently used, but the code supports them via python-dotenv.
+Cache behavior can be configured via environment variables (see `.env.example`):
+- `REDIS_HOST`: Redis server host (default: localhost)
+- `REDIS_PORT`: Redis server port (default: 6379)
+- `REDIS_DB`: Redis database number (default: 0)
+- `REDIS_PASSWORD`: Redis authentication password (optional)
+- `CACHE_DIR`: File cache directory (default: .cache)
+- `CACHE_MAX_ENTRIES`: Maximum file cache entries (default: 1000)
 
 ## Common Tasks
 
@@ -318,6 +343,7 @@ Results JSON files in `cypress/results/` show what data was extracted.
 4. **Permission denied**: Verify spreadsheet is shared with service account email
 5. **Running `npx cypress open` while `run_audit.py` is running**: These conflict because Cypress can only run one instance at a time. Close the Cypress UI before running the audit script.
 6. **Slow processing**: Ensure you're not running `npx cypress open` simultaneously, which blocks the headless execution
+7. **Cache issues**: See CACHE_GUIDE.md for troubleshooting cache-related problems
 
 ## Dependencies
 
@@ -327,6 +353,7 @@ Results JSON files in `cypress/results/` show what data was extracted.
 - `google-auth-httplib2`: HTTP transport
 - `google-api-python-client`: Google Sheets API
 - `python-dotenv`: Environment variables (optional)
+- `redis`: Redis client for caching (optional, falls back to file cache)
 - `argparse`: Command-line parsing (built-in)
 
 ### Node.js (package.json)
