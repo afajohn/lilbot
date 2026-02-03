@@ -28,6 +28,27 @@ python run_audit.py --tab "TAB_NAME" --service-account "service-account.json"
 python run_audit.py --tab "TAB_NAME" --timeout 1200
 # Optional: Skip cache for fresh analysis
 python run_audit.py --tab "TAB_NAME" --skip-cache
+# Optional: Dry run mode (simulate without changes)
+python run_audit.py --tab "TAB_NAME" --dry-run
+# Optional: URL filtering
+python run_audit.py --tab "TAB_NAME" --whitelist "https://example.com/*" --blacklist "http://*"
+```
+
+**Validate Service Account:**
+```bash
+python validate_service_account.py service-account.json
+```
+
+**Query Audit Trail:**
+```bash
+# View all modifications
+python query_audit_trail.py
+
+# Filter by spreadsheet and date
+python query_audit_trail.py --spreadsheet-id "YOUR_ID" --start-date "2024-01-01"
+
+# Show detailed output
+python query_audit_trail.py --format detailed --limit 10
 ```
 
 **Cache Management:**
@@ -76,6 +97,7 @@ python -m pytest  # Or use run_tests.ps1 (Windows) or ./run_tests.sh (Unix)
 - **APIs**: Google Sheets API v4
 - **Caching**: Redis (with file-based fallback)
 - **Monitoring**: Prometheus-compatible metrics, Plotly dashboards
+- **Security**: Service account validation, rate limiting, URL filtering, audit trail
 - **Key Libraries**:
   - `google-api-python-client` - Google Sheets integration
   - `google-auth` - Authentication
@@ -118,6 +140,11 @@ The system has been optimized for faster URL processing:
 │   │   └── cypress_runner.py # Cypress automation wrapper
 │   ├── cache/
 │   │   └── cache_manager.py  # Cache layer (Redis + file backend)
+│   ├── security/
+│   │   ├── service_account_validator.py  # Service account validation
+│   │   ├── url_filter.py     # URL whitelist/blacklist filtering
+│   │   ├── audit_trail.py    # Audit trail logging
+│   │   └── rate_limiter.py   # Per-spreadsheet rate limiting
 │   └── utils/
 │       └── logger.py         # Logging utilities
 ├── cypress/
@@ -127,7 +154,11 @@ The system has been optimized for faster URL processing:
 ├── .cache/                   # File cache storage (gitignored)
 ├── metrics.json              # JSON metrics export (gitignored)
 ├── metrics.prom              # Prometheus metrics export (gitignored)
-└── dashboard.html            # HTML metrics dashboard (gitignored)
+├── dashboard.html            # HTML metrics dashboard (gitignored)
+├── audit_trail.jsonl         # Audit trail log (gitignored)
+├── validate_service_account.py  # Service account validator utility
+├── query_audit_trail.py      # Audit trail query utility
+└── SECURITY.md               # Security features documentation
 ```
 
 ### Data Flow
@@ -254,6 +285,12 @@ Cypress runs can fail transiently. The system has multiple layers of retry:
 - `DESKTOP_COLUMN`: Column for desktop results (default: 'G')
 - `SCORE_THRESHOLD`: Minimum passing score (default: 80)
 - Default timeout: 600 seconds (can be overridden with --timeout flag)
+
+### Security Configuration
+- `RATE_LIMIT_REQUESTS_PER_MINUTE`: API rate limit per spreadsheet (default: 60)
+- `AUDIT_TRAIL_PATH`: Path to audit trail log file (default: audit_trail.jsonl)
+- `URL_WHITELIST`: Comma-separated URL patterns to allow
+- `URL_BLACKLIST`: Comma-separated URL patterns to block
 
 ### Environment Variables
 Cache behavior can be configured via environment variables (see `.env.example`):
@@ -395,10 +432,45 @@ Results JSON files in `cypress/results/` show what data was extracted.
 
 ## Security
 
+### Credentials
 - Service account credentials (`service-account.json`) must never be committed
 - `.gitignore` excludes all `*service-account*.json` files
 - Service accounts should have minimal permissions (only Sheets access needed)
 - Spreadsheets should only be shared with necessary service accounts
+
+### Security Features
+See `SECURITY.md` for detailed documentation on:
+
+1. **Service Account Validation**
+   - Validates required fields in service account JSON
+   - Checks private key format and email format
+   - Automatic validation during authentication
+
+2. **API Rate Limiting**
+   - Per-spreadsheet rate limiting (60 req/min default)
+   - Token bucket algorithm with burst tolerance
+   - Prevents API quota exhaustion
+
+3. **URL Filtering**
+   - Whitelist support: `--whitelist "https://example.com/*"`
+   - Blacklist support: `--blacklist "http://*"`
+   - Pattern-based with wildcard support
+
+4. **URL Sanitization**
+   - Validates URL format before processing
+   - Blocks dangerous characters
+   - Normalizes protocols
+
+5. **Audit Trail**
+   - Logs all spreadsheet modifications
+   - JSON Lines format with timestamps
+   - Includes user, operation, location, and value
+   - Query with `query_audit_trail.py`
+
+6. **Dry Run Mode**
+   - Simulate operations without changes: `--dry-run`
+   - Test filters and validation
+   - Review before execution
 
 ## Monitoring and Metrics
 

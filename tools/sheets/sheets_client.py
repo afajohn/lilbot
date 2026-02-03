@@ -10,6 +10,9 @@ from tools.utils.exceptions import RetryableError, PermanentError
 from tools.utils.retry import retry_with_backoff
 from tools.utils.error_metrics import get_global_metrics
 from tools.utils.logger import get_logger
+from tools.security.service_account_validator import ServiceAccountValidator
+from tools.security.rate_limiter import get_spreadsheet_rate_limiter
+from tools.security.audit_trail import get_audit_trail
 
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -222,6 +225,11 @@ def authenticate(service_account_file: str):
                 f"Please download your service account JSON file from Google Cloud Console "
                 f"and save it as '{service_account_file}'"
             )
+        
+        valid, errors = ServiceAccountValidator.validate(service_account_file)
+        if not valid:
+            error_msg = "Service account validation failed:\n" + "\n".join(f"  - {err}" for err in errors)
+            raise PermanentError(error_msg)
         
         try:
             credentials = service_account.Credentials.from_service_account_file(
@@ -437,7 +445,7 @@ def _has_target_background_color(cell: dict) -> bool:
 _write_lock = threading.Lock()
 
 
-def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: str, url: str, service=None, service_account_file: Optional[str] = None) -> None:
+def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: str, url: str, service=None, service_account_file: Optional[str] = None, dry_run: bool = False) -> None:
     """
     Write a PSI URL to a specific cell in the spreadsheet (thread-safe).
     
@@ -449,6 +457,7 @@ def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: st
         url: The PSI URL to write
         service: Optional authenticated service object. If not provided, service_account_file must be provided
         service_account_file: Optional path to service account JSON file. Used if service is not provided
+        dry_run: If True, log the operation but don't execute it
         
     Raises:
         PermanentError: If there's a permission or resource error
@@ -457,6 +466,16 @@ def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: st
         if service_account_file is None:
             raise ValueError("Either service or service_account_file must be provided")
         service = authenticate(service_account_file)
+    
+    rate_limiter = get_spreadsheet_rate_limiter()
+    audit_trail = get_audit_trail()
+    logger = get_logger()
+    
+    if dry_run:
+        logger.info(f"[DRY RUN] Would write to {tab_name}!{column}{row_index}: {url}")
+        return
+    
+    rate_limiter.acquire(spreadsheet_id)
     
     with _write_lock:
         sheet = service.spreadsheets()
@@ -475,9 +494,17 @@ def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: st
             ).execute()
         
         _execute_with_retry(_write)
+        
+        audit_trail.log_modification(
+            spreadsheet_id=spreadsheet_id,
+            tab_name=tab_name,
+            row_index=row_index,
+            column=column,
+            value=url
+        )
 
 
-def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple[int, str, str]], service=None, service_account_file: Optional[str] = None) -> None:
+def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple[int, str, str]], service=None, service_account_file: Optional[str] = None, dry_run: bool = False) -> None:
     """
     Batch write PSI URLs to multiple cells in the spreadsheet (thread-safe).
     Writes in chunks of 100 cells with retry and exponential backoff.
@@ -488,6 +515,7 @@ def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple
         updates: List of tuples containing (row_index, column, url)
         service: Optional authenticated service object. If not provided, service_account_file must be provided
         service_account_file: Optional path to service account JSON file. Used if service is not provided
+        dry_run: If True, log the operation but don't execute it
         
     Raises:
         PermanentError: If there's a permission or resource error
@@ -499,6 +527,17 @@ def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple
         if service_account_file is None:
             raise ValueError("Either service or service_account_file must be provided")
         service = authenticate(service_account_file)
+    
+    rate_limiter = get_spreadsheet_rate_limiter()
+    audit_trail = get_audit_trail()
+    logger = get_logger()
+    
+    if dry_run:
+        for row_index, column, url in updates:
+            logger.info(f"[DRY RUN] Would write to {tab_name}!{column}{row_index}: {url}")
+        return
+    
+    rate_limiter.acquire(spreadsheet_id)
     
     with _write_lock:
         sheet = service.spreadsheets()
@@ -527,3 +566,9 @@ def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple
                 ).execute()
             
             _execute_with_retry(_batch_write)
+            
+            audit_trail.log_batch_modification(
+                spreadsheet_id=spreadsheet_id,
+                tab_name=tab_name,
+                updates=chunk
+            )

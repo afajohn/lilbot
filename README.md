@@ -10,6 +10,8 @@ Automated tool for running PageSpeed Insights audits on URLs from Google Sheets 
 - **[AGENTS.md](AGENTS.md)** - Developer guide
 - **[CACHE_GUIDE.md](CACHE_GUIDE.md)** - Caching configuration and usage
 - **[PERFORMANCE_OPTIMIZATIONS.md](PERFORMANCE_OPTIMIZATIONS.md)** - Performance improvements and benchmarks
+- **[SECURITY.md](SECURITY.md)** - Security hardening features (detailed)
+- **[SECURITY_QUICK_REFERENCE.md](SECURITY_QUICK_REFERENCE.md)** - Security quick reference guide
 
 ## Overview
 
@@ -35,6 +37,8 @@ This tool reads URLs from a Google Spreadsheet, analyzes each URL using PageSpee
 - ✅ Comprehensive logging
 - ✅ Windows Unicode encoding fix
 - ✅ Optimized for faster processing (~10 minutes per URL instead of 15+)
+- ✅ **Security hardening: service account validation, rate limiting, URL filtering, audit trail**
+- ✅ **Dry run mode for safe testing**
 
 ## Prerequisites
 
@@ -127,6 +131,9 @@ python run_audit.py --tab "Barranquilla Singles" --service-account "service-acco
 | `--timeout` | No | `600` | Timeout in seconds for each URL analysis |
 | `--concurrency` | No | `3` | Number of concurrent workers (1-5) |
 | `--skip-cache` | No | `False` | Skip cache and force fresh analysis |
+| `--whitelist` | No | - | URL whitelist patterns (space-separated) |
+| `--blacklist` | No | - | URL blacklist patterns (space-separated) |
+| `--dry-run` | No | `False` | Simulate operations without making changes |
 
 ### Examples
 
@@ -160,6 +167,16 @@ python run_audit.py --tab "Website 1" --skip-cache
 python run_audit.py --tab "Website 1" --concurrency 5
 ```
 
+**Filter URLs with whitelist/blacklist:**
+```bash
+python run_audit.py --tab "Website 1" --whitelist "https://example.com/*" --blacklist "http://*"
+```
+
+**Dry run (simulate without changes):**
+```bash
+python run_audit.py --tab "Website 1" --dry-run
+```
+
 ### List Available Tabs
 
 To see all available tabs in your spreadsheet:
@@ -182,6 +199,24 @@ python invalidate_cache.py --all
 ```
 
 **Note**: By default, the tool uses a file-based cache in `.cache/` directory. For production use with Redis, see [CACHE_GUIDE.md](CACHE_GUIDE.md).
+
+### Security Features
+
+**Validate service account:**
+```bash
+python validate_service_account.py service-account.json
+```
+
+**Query audit trail:**
+```bash
+# View all modifications
+python query_audit_trail.py
+
+# Filter by date and tab
+python query_audit_trail.py --tab "Website 1" --start-date "2024-01-01" --format detailed
+```
+
+**For complete security documentation, see [SECURITY.md](SECURITY.md)**.
 
 ## Google Sheets Format
 
@@ -423,16 +458,25 @@ Modify `cypress.config.js` to change:
 ├── run_audit.py                 # Main entry point
 ├── list_tabs.py                 # Utility to list spreadsheet tabs
 ├── get_service_account_email.py # Utility to get service account email
+├── validate_service_account.py  # Service account validator
+├── query_audit_trail.py         # Audit trail query utility
 ├── requirements.txt             # Python dependencies
 ├── package.json                 # Node.js dependencies
 ├── cypress.config.js            # Cypress configuration
 ├── service-account.json         # Google Cloud credentials (not in repo)
+├── audit_trail.jsonl            # Audit trail log (gitignored)
 ├── README.md                    # This file
+├── SECURITY.md                  # Security documentation
 ├── tools/
 │   ├── sheets/
 │   │   └── sheets_client.py    # Google Sheets API wrapper
 │   ├── qa/
 │   │   └── cypress_runner.py   # Cypress automation wrapper
+│   ├── security/
+│   │   ├── service_account_validator.py  # Service account validation
+│   │   ├── url_filter.py       # URL filtering (whitelist/blacklist)
+│   │   ├── audit_trail.py      # Audit trail logging
+│   │   └── rate_limiter.py     # Per-spreadsheet rate limiting
 │   └── utils/
 │       └── logger.py            # Logging utilities
 ├── cypress/

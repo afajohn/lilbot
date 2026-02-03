@@ -75,7 +75,7 @@ def temp_service_account_file(tmp_path):
         "type": "service_account",
         "project_id": "test-project",
         "private_key_id": "key-id",
-        "private_key": "-----BEGIN PRIVATE KEY-----\\ntest\\n-----END PRIVATE KEY-----\\n",
+        "private_key": "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
         "client_email": "test@test-project.iam.gserviceaccount.com",
         "client_id": "123456789",
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",

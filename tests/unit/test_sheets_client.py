@@ -30,17 +30,19 @@ class TestAuthenticate:
         mock_build.assert_called_once_with('sheets', 'v4', credentials=mock_credentials)
     
     def test_authenticate_file_not_found(self):
+        from tools.utils.exceptions import PermanentError
         sheets_client._service_cache.clear()
         
-        with pytest.raises(FileNotFoundError, match="Service account file not found"):
+        with pytest.raises(PermanentError, match="Service account file not found"):
             sheets_client.authenticate('nonexistent.json')
     
     @patch('sheets.sheets_client.service_account.Credentials.from_service_account_file')
     def test_authenticate_invalid_credentials(self, mock_from_file, temp_service_account_file):
+        from tools.utils.exceptions import PermanentError
         mock_from_file.side_effect = Exception("Invalid JSON")
         sheets_client._service_cache.clear()
         
-        with pytest.raises(ValueError, match="Invalid service account file"):
+        with pytest.raises(PermanentError, match="Invalid service account file"):
             sheets_client.authenticate(temp_service_account_file)
     
     @patch('sheets.sheets_client.service_account.Credentials.from_service_account_file')
@@ -85,8 +87,9 @@ class TestListTabs:
         
         mock_google_service.spreadsheets().get().execute.side_effect = error
         
+        from tools.utils.exceptions import PermanentError
         with patch('sheets.sheets_client._execute_with_retry', side_effect=error):
-            with pytest.raises(ValueError, match="Spreadsheet not found"):
+            with pytest.raises(PermanentError, match="Spreadsheet not found"):
                 sheets_client.list_tabs('invalid-id', service=mock_google_service)
     
     def test_list_tabs_permission_denied(self, mock_google_service):
@@ -96,8 +99,9 @@ class TestListTabs:
         
         mock_google_service.spreadsheets().get().execute.side_effect = error
         
+        from tools.utils.exceptions import PermanentError
         with patch('sheets.sheets_client._execute_with_retry', side_effect=error):
-            with pytest.raises(PermissionError, match="Access denied"):
+            with pytest.raises(PermanentError, match="Access denied"):
                 sheets_client.list_tabs('test-id', service=mock_google_service)
     
     @patch('sheets.sheets_client.authenticate')
@@ -211,9 +215,10 @@ class TestReadUrls:
         mock_sheets = mock_google_service.spreadsheets()
         mock_sheets.values().get().execute.side_effect = error
         
+        from tools.utils.exceptions import PermanentError
         with patch('sheets.sheets_client.list_tabs', return_value=['Sheet1', 'Sheet2']):
             with patch('sheets.sheets_client._execute_with_retry', side_effect=error):
-                with pytest.raises(ValueError, match="Tab 'InvalidTab' not found"):
+                with pytest.raises(PermanentError, match="Tab 'InvalidTab' not found"):
                     sheets_client.read_urls('test-id', 'InvalidTab', service=mock_google_service)
     
     @patch('sheets.sheets_client.authenticate')
@@ -477,4 +482,4 @@ class TestExecuteWithRetry:
                 with pytest.raises(Exception, match='Persistent Error'):
                     sheets_client._execute_with_retry(mock_func, max_retries=3)
         
-        assert mock_func.call_count == 3
+        assert mock_func.call_count == 4

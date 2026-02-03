@@ -16,6 +16,7 @@ from utils import logger
 from utils.error_metrics import get_global_metrics
 from utils.exceptions import RetryableError, PermanentError
 from metrics.metrics_collector import get_metrics_collector
+from security.url_filter import URLFilter
 
 
 DEFAULT_SPREADSHEET_ID = '1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I'
@@ -46,7 +47,9 @@ def process_url(
     timeout: int,
     total_urls: int,
     processed_count: dict,
-    skip_cache: bool = False
+    skip_cache: bool = False,
+    url_filter: Optional[URLFilter] = None,
+    dry_run: bool = False
 ) -> Dict[str, Any]:
     """
     Process a single URL with thread-safe logging and error metrics collection.
@@ -60,6 +63,8 @@ def process_url(
         total_urls: Total number of URLs to process
         processed_count: Shared counter dictionary with lock
         skip_cache: If True, bypass cache and force fresh analysis
+        url_filter: Optional URL filter for whitelist/blacklist
+        dry_run: If True, simulate operations without making changes
         
     Returns:
         Dictionary with result data
@@ -105,8 +110,36 @@ def process_url(
             'skipped': True
         }
     
+    try:
+        sanitized_url = URLFilter.sanitize_url(url)
+    except ValueError as e:
+        with log_lock:
+            log.error(f"[{current_idx}/{total_urls}] Invalid URL {url}: {e}")
+            log.info("")
+        metrics_collector.record_url_failure(start_time, reason='invalid_url')
+        return {
+            'row': row_index,
+            'url': url,
+            'error': str(e),
+            'error_type': 'invalid_url'
+        }
+    
+    if url_filter and not url_filter.is_allowed(sanitized_url):
+        with log_lock:
+            log.info(f"[{current_idx}/{total_urls}] URL rejected by filter: {sanitized_url}")
+            log.info("")
+        metrics_collector.record_url_skipped()
+        return {
+            'row': row_index,
+            'url': url,
+            'skipped': True,
+            'reason': 'filtered'
+        }
+    
     with log_lock:
-        log.info(f"[{current_idx}/{total_urls}] Analyzing {url}...")
+        log.info(f"[{current_idx}/{total_urls}] Analyzing {sanitized_url}...")
+        if dry_run:
+            log.info(f"  [DRY RUN MODE] - No changes will be made")
         if existing_mobile_psi:
             log.info(f"  Mobile PSI URL already exists (column F filled), will only update desktop")
         if existing_desktop_psi:
@@ -114,8 +147,18 @@ def process_url(
         if skip_cache:
             log.info(f"  Cache disabled for this analysis")
     
+    if dry_run:
+        with log_lock:
+            log.info(f"  [DRY RUN] Would analyze {sanitized_url}")
+            log.info("")
+        return {
+            'row': row_index,
+            'url': url,
+            'dry_run': True
+        }
+    
     try:
-        result = cypress_runner.run_analysis(url, timeout=timeout, skip_cache=skip_cache)
+        result = cypress_runner.run_analysis(sanitized_url, timeout=timeout, skip_cache=skip_cache)
         
         mobile_score = result.get('mobile_score')
         desktop_score = result.get('desktop_score')
@@ -149,7 +192,8 @@ def process_url(
                     spreadsheet_id,
                     tab_name,
                     updates,
-                    service=service
+                    service=service,
+                    dry_run=dry_run
                 )
                 with log_lock:
                     log.info(f"  Updated spreadsheet with {len(updates)} value(s)")
@@ -364,6 +408,21 @@ def main():
         action='store_true',
         help='Skip cache and force fresh analysis for all URLs'
     )
+    parser.add_argument(
+        '--whitelist',
+        nargs='*',
+        help='URL whitelist patterns (e.g., https://example.com/* https://*.domain.com/*)'
+    )
+    parser.add_argument(
+        '--blacklist',
+        nargs='*',
+        help='URL blacklist patterns (e.g., http://* https://blocked.com/*)'
+    )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Simulate the audit without making any changes to the spreadsheet'
+    )
     
     args = parser.parse_args()
     
@@ -426,10 +485,20 @@ def main():
         log.info("No URLs found in the spreadsheet.")
         sys.exit(0)
     
+    url_filter = None
+    if args.whitelist or args.blacklist:
+        url_filter = URLFilter(whitelist=args.whitelist, blacklist=args.blacklist)
+    
     log.info(f"Found {len(urls)} URLs to analyze.")
     log.info(f"Using {args.concurrency} concurrent workers.")
     if args.skip_cache:
         log.info("Cache is disabled (--skip-cache flag)")
+    if args.dry_run:
+        log.info("DRY RUN MODE: No changes will be made to the spreadsheet")
+    if args.whitelist:
+        log.info(f"URL whitelist: {args.whitelist}")
+    if args.blacklist:
+        log.info(f"URL blacklist: {args.blacklist}")
     log.info("")
     
     processed_count = {'count': 0, 'lock': threading.Lock()}
@@ -446,7 +515,9 @@ def main():
                 args.timeout,
                 len(urls),
                 processed_count,
-                args.skip_cache
+                args.skip_cache,
+                url_filter,
+                args.dry_run
             ): url_data for url_data in urls
         }
         
@@ -495,7 +566,8 @@ def main():
     
     total_urls = len(results)
     skipped = sum(1 for r in results if r.get('skipped', False))
-    analyzed = sum(1 for r in results if not r.get('skipped', False) and 'error' not in r)
+    dry_run_count = sum(1 for r in results if r.get('dry_run', False))
+    analyzed = sum(1 for r in results if not r.get('skipped', False) and 'error' not in r and not r.get('dry_run', False))
     failed = sum(1 for r in results if 'error' in r)
     
     mobile_pass = sum(1 for r in results if r.get('mobile_score') is not None and r['mobile_score'] >= SCORE_THRESHOLD)
@@ -505,6 +577,8 @@ def main():
     
     log.info(f"Total URLs processed: {total_urls}")
     log.info(f"URLs skipped: {skipped}")
+    if args.dry_run:
+        log.info(f"URLs simulated (dry run): {dry_run_count}")
     log.info(f"URLs analyzed: {analyzed}")
     log.info(f"Failed analyses: {failed}")
     log.info("")

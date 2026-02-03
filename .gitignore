@@ -83,3 +83,7 @@ coverage.svg
 metrics.json
 metrics.prom
 dashboard.html
+
+# Security and Audit Trail
+audit_trail.jsonl
+audit_trail*.jsonl
