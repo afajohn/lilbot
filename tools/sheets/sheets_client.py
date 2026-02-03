@@ -4,6 +4,12 @@ from googleapiclient.errors import HttpError
 from typing import List, Tuple, Optional
 import threading
 import time
+import traceback
+
+from tools.utils.exceptions import RetryableError, PermanentError
+from tools.utils.retry import retry_with_backoff
+from tools.utils.error_metrics import get_global_metrics
+from tools.utils.logger import get_logger
 
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -71,20 +77,119 @@ def _execute_with_retry(func, max_retries: int = 3, initial_delay: float = 2.0):
     Raises:
         Last exception if all retries fail
     """
+    logger = get_logger()
+    metrics = get_global_metrics()
     delay = initial_delay
     last_exception = None
+    was_retried = False
+    func_name = getattr(func, '__name__', 'unknown_function')
     
-    for attempt in range(max_retries):
+    for attempt in range(max_retries + 1):
         try:
             _rate_limiter.acquire()
-            return func()
+            result = func()
+            if was_retried:
+                metrics.record_success(func_name, was_retried=True)
+            return result
+            
+        except HttpError as e:
+            last_exception = e
+            was_retried = True
+            
+            if e.resp.status == 403:
+                metrics.record_error(
+                    error_type='PermissionError',
+                    function_name=func_name,
+                    error_message=f"Permission denied (HTTP 403)",
+                    is_retryable=False,
+                    attempt=attempt + 1,
+                    traceback=traceback.format_exc()
+                )
+                raise PermanentError(
+                    "Permission denied. Check service account permissions.",
+                    original_exception=e
+                )
+            
+            elif e.resp.status == 404:
+                metrics.record_error(
+                    error_type='NotFoundError',
+                    function_name=func_name,
+                    error_message=f"Resource not found (HTTP 404)",
+                    is_retryable=False,
+                    attempt=attempt + 1,
+                    traceback=traceback.format_exc()
+                )
+                raise PermanentError(
+                    "Resource not found.",
+                    original_exception=e
+                )
+            
+            elif e.resp.status == 429 or e.resp.status >= 500:
+                metrics.record_error(
+                    error_type='RetryableHttpError',
+                    function_name=func_name,
+                    error_message=f"HTTP {e.resp.status}: {str(e)}",
+                    is_retryable=True,
+                    attempt=attempt + 1,
+                    traceback=traceback.format_exc()
+                )
+                
+                if attempt < max_retries:
+                    actual_delay = min(delay, 60.0)
+                    logger.warning(
+                        f"Retryable HTTP error (status {e.resp.status}) in {func_name} "
+                        f"(attempt {attempt + 1}/{max_retries + 1}). Retrying in {actual_delay:.2f}s",
+                        extra={
+                            'function': func_name,
+                            'attempt': attempt + 1,
+                            'http_status': e.resp.status,
+                            'retry_delay': actual_delay
+                        }
+                    )
+                    time.sleep(actual_delay)
+                    delay *= 2
+                    continue
+            else:
+                metrics.record_error(
+                    error_type='UnexpectedHttpError',
+                    function_name=func_name,
+                    error_message=f"HTTP {e.resp.status}: {str(e)}",
+                    is_retryable=False,
+                    attempt=attempt + 1,
+                    traceback=traceback.format_exc()
+                )
+                raise
+        
         except Exception as e:
             last_exception = e
-            if attempt < max_retries - 1:
+            was_retried = True
+            
+            metrics.record_error(
+                error_type=type(e).__name__,
+                function_name=func_name,
+                error_message=str(e),
+                is_retryable=True,
+                attempt=attempt + 1,
+                traceback=traceback.format_exc()
+            )
+            
+            if attempt < max_retries:
+                logger.warning(
+                    f"Error in {func_name} (attempt {attempt + 1}/{max_retries + 1}): {str(e)}. "
+                    f"Retrying in {delay:.2f}s",
+                    extra={
+                        'function': func_name,
+                        'attempt': attempt + 1,
+                        'error_type': type(e).__name__,
+                        'retry_delay': delay
+                    }
+                )
                 time.sleep(delay)
                 delay *= 2
+                continue
     
-    raise last_exception
+    if last_exception:
+        raise last_exception
 
 
 def authenticate(service_account_file: str):
@@ -98,8 +203,7 @@ def authenticate(service_account_file: str):
         Authorized Google Sheets service object
         
     Raises:
-        FileNotFoundError: If service account file doesn't exist
-        ValueError: If service account file is invalid
+        PermanentError: If service account file doesn't exist or is invalid
     """
     import os
     
@@ -108,7 +212,7 @@ def authenticate(service_account_file: str):
             return _service_cache[service_account_file]
         
         if not os.path.exists(service_account_file):
-            raise FileNotFoundError(
+            raise PermanentError(
                 f"Service account file not found: {service_account_file}\n"
                 f"Please download your service account JSON file from Google Cloud Console "
                 f"and save it as '{service_account_file}'"
@@ -122,7 +226,7 @@ def authenticate(service_account_file: str):
             _service_cache[service_account_file] = service
             return service
         except Exception as e:
-            raise ValueError(f"Invalid service account file: {e}")
+            raise PermanentError(f"Invalid service account file: {e}", original_exception=e)
 
 
 def list_tabs(spreadsheet_id: str, service=None, service_account_file: Optional[str] = None) -> List[str]:
@@ -136,6 +240,9 @@ def list_tabs(spreadsheet_id: str, service=None, service_account_file: Optional[
         
     Returns:
         List of tab names
+        
+    Raises:
+        PermanentError: If spreadsheet not found or permission denied
     """
     if service is None:
         if service_account_file is None:
@@ -150,19 +257,23 @@ def list_tabs(spreadsheet_id: str, service=None, service_account_file: Optional[
     
     try:
         return _execute_with_retry(_list)
+    except PermanentError:
+        raise
     except HttpError as e:
         if e.resp.status == 404:
-            raise ValueError(
+            raise PermanentError(
                 f"Spreadsheet not found (ID: {spreadsheet_id}).\n"
                 f"Please verify:\n"
                 f"  1. The spreadsheet ID is correct\n"
                 f"  2. The spreadsheet exists\n"
-                f"  3. Your service account has access to this spreadsheet"
+                f"  3. Your service account has access to this spreadsheet",
+                original_exception=e
             )
         elif e.resp.status == 403:
-            raise PermissionError(
+            raise PermanentError(
                 f"Access denied to spreadsheet (ID: {spreadsheet_id}).\n"
-                f"Please share the spreadsheet with your service account email."
+                f"Please share the spreadsheet with your service account email.",
+                original_exception=e
             )
         raise
 
@@ -185,8 +296,7 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
         - should_skip is True if either F or G cell contains "passed" or has background color #b7e1cd
         
     Raises:
-        ValueError: If tab doesn't exist or spreadsheet is not accessible
-        PermissionError: If service account doesn't have access
+        PermanentError: If tab doesn't exist or permission denied
     """
     if service is None:
         if service_account_file is None:
@@ -212,6 +322,8 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
     
     try:
         result, spreadsheet_data = _execute_with_retry(_read)
+    except PermanentError:
+        raise
     except HttpError as e:
         if e.resp.status == 404:
             available_tabs = list_tabs(spreadsheet_id, service=service)
@@ -220,11 +332,12 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
                 error_msg += f"Available tabs: {', '.join(available_tabs)}"
             else:
                 error_msg += "No tabs found in spreadsheet."
-            raise ValueError(error_msg)
+            raise PermanentError(error_msg, original_exception=e)
         elif e.resp.status == 403:
-            raise PermissionError(
+            raise PermanentError(
                 f"Access denied to spreadsheet (ID: {spreadsheet_id}).\n"
-                f"Please share the spreadsheet with your service account email."
+                f"Please share the spreadsheet with your service account email.",
+                original_exception=e
             )
         raise
     
@@ -331,6 +444,9 @@ def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: st
         url: The PSI URL to write
         service: Optional authenticated service object. If not provided, service_account_file must be provided
         service_account_file: Optional path to service account JSON file. Used if service is not provided
+        
+    Raises:
+        PermanentError: If there's a permission or resource error
     """
     if service is None:
         if service_account_file is None:
@@ -367,6 +483,9 @@ def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple
         updates: List of tuples containing (row_index, column, url)
         service: Optional authenticated service object. If not provided, service_account_file must be provided
         service_account_file: Optional path to service account JSON file. Used if service is not provided
+        
+    Raises:
+        PermanentError: If there's a permission or resource error
     """
     if not updates:
         return

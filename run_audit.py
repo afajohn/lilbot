@@ -4,6 +4,7 @@ import sys
 import os
 import signal
 import threading
+import traceback
 from typing import List, Tuple, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -12,6 +13,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
 from sheets import sheets_client
 from qa import cypress_runner
 from utils import logger
+from utils.error_metrics import get_global_metrics
+from utils.exceptions import RetryableError, PermanentError
 
 
 DEFAULT_SPREADSHEET_ID = '1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I'
@@ -44,7 +47,7 @@ def process_url(
     processed_count: dict
 ) -> Dict[str, Any]:
     """
-    Process a single URL with thread-safe logging.
+    Process a single URL with thread-safe logging and error metrics collection.
     
     Args:
         url_data: Tuple of (row_index, url, existing_mobile_psi, existing_desktop_psi, should_skip)
@@ -59,6 +62,7 @@ def process_url(
         Dictionary with result data
     """
     log = logger.get_logger()
+    metrics = get_global_metrics()
     row_index, url, existing_mobile_psi, existing_desktop_psi, should_skip = url_data
     
     if shutdown_event.is_set():
@@ -139,9 +143,36 @@ def process_url(
                 )
                 with log_lock:
                     log.info(f"  Updated spreadsheet with {len(updates)} value(s)")
+            except PermanentError as e:
+                with log_lock:
+                    logger.log_error_with_context(
+                        log,
+                        f"  PERMANENT ERROR: Failed to update spreadsheet: {e}",
+                        exception=e,
+                        context={'url': url, 'row': row_index}
+                    )
+                metrics.record_error(
+                    error_type='PermanentError',
+                    function_name='batch_write_psi_urls',
+                    error_message=str(e),
+                    is_retryable=False,
+                    traceback=traceback.format_exc()
+                )
             except Exception as e:
                 with log_lock:
-                    log.error(f"  WARNING: Failed to update spreadsheet: {e}")
+                    logger.log_error_with_context(
+                        log,
+                        f"  WARNING: Failed to update spreadsheet: {e}",
+                        exception=e,
+                        context={'url': url, 'row': row_index}
+                    )
+                metrics.record_error(
+                    error_type=type(e).__name__,
+                    function_name='batch_write_psi_urls',
+                    error_message=str(e),
+                    is_retryable=True,
+                    traceback=traceback.format_exc()
+                )
         
         with log_lock:
             log.info(f"Successfully analyzed {url}")
@@ -159,35 +190,126 @@ def process_url(
     except cypress_runner.CypressTimeoutError as e:
         error_msg = f"Timeout - {e}"
         with log_lock:
-            log.error(f"  ERROR: {error_msg}")
+            logger.log_error_with_context(
+                log,
+                f"  ERROR: {error_msg}",
+                exception=e,
+                context={'url': url, 'row': row_index, 'timeout': timeout}
+            )
             log.error(f"Failed to analyze {url} due to timeout", exc_info=True)
             log.info("")
+        metrics.record_error(
+            error_type='CypressTimeoutError',
+            function_name='process_url',
+            error_message=str(e),
+            is_retryable=False,
+            traceback=traceback.format_exc()
+        )
         return {
             'row': row_index,
             'url': url,
-            'error': str(e)
+            'error': str(e),
+            'error_type': 'timeout'
         }
+        
     except cypress_runner.CypressRunnerError as e:
         error_msg = f"Cypress failed - {e}"
         with log_lock:
-            log.error(f"  ERROR: {error_msg}")
+            logger.log_error_with_context(
+                log,
+                f"  ERROR: {error_msg}",
+                exception=e,
+                context={'url': url, 'row': row_index}
+            )
             log.error(f"Failed to analyze {url} due to Cypress error", exc_info=True)
             log.info("")
+        metrics.record_error(
+            error_type='CypressRunnerError',
+            function_name='process_url',
+            error_message=str(e),
+            is_retryable=True,
+            traceback=traceback.format_exc()
+        )
         return {
             'row': row_index,
             'url': url,
-            'error': str(e)
+            'error': str(e),
+            'error_type': 'cypress'
         }
+        
+    except PermanentError as e:
+        error_msg = f"Permanent error - {e}"
+        with log_lock:
+            logger.log_error_with_context(
+                log,
+                f"  PERMANENT ERROR: {error_msg}",
+                exception=e,
+                context={'url': url, 'row': row_index}
+            )
+            log.error(f"Failed to analyze {url} due to permanent error", exc_info=True)
+            log.info("")
+        metrics.record_error(
+            error_type='PermanentError',
+            function_name='process_url',
+            error_message=str(e),
+            is_retryable=False,
+            traceback=traceback.format_exc()
+        )
+        return {
+            'row': row_index,
+            'url': url,
+            'error': str(e),
+            'error_type': 'permanent'
+        }
+        
+    except RetryableError as e:
+        error_msg = f"Retryable error - {e}"
+        with log_lock:
+            logger.log_error_with_context(
+                log,
+                f"  RETRYABLE ERROR: {error_msg}",
+                exception=e,
+                context={'url': url, 'row': row_index}
+            )
+            log.error(f"Failed to analyze {url} due to retryable error", exc_info=True)
+            log.info("")
+        metrics.record_error(
+            error_type='RetryableError',
+            function_name='process_url',
+            error_message=str(e),
+            is_retryable=True,
+            traceback=traceback.format_exc()
+        )
+        return {
+            'row': row_index,
+            'url': url,
+            'error': str(e),
+            'error_type': 'retryable'
+        }
+        
     except Exception as e:
         error_msg = f"Unexpected error - {e}"
         with log_lock:
-            log.error(f"  ERROR: {error_msg}")
+            logger.log_error_with_context(
+                log,
+                f"  ERROR: {error_msg}",
+                exception=e,
+                context={'url': url, 'row': row_index}
+            )
             log.error(f"Failed to analyze {url} due to unexpected error", exc_info=True)
             log.info("")
+        metrics.record_error(
+            error_type=type(e).__name__,
+            function_name='process_url',
+            error_message=str(e),
+            is_retryable=False,
+            traceback=traceback.format_exc()
+        )
         return {
             'row': row_index,
             'url': url,
-            'error': str(e)
+            'error': str(e),
+            'error_type': 'unexpected'
         }
 
 
@@ -233,6 +355,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     log = logger.setup_logger()
+    metrics = get_global_metrics()
     
     if not os.path.exists(args.service_account):
         log.error(f"Service account file not found: {args.service_account}")
@@ -242,7 +365,7 @@ def main():
     try:
         service = sheets_client.authenticate(args.service_account)
         log.info("Authentication successful")
-    except FileNotFoundError as e:
+    except PermanentError as e:
         log.error(f"\n{e}")
         log.error("\nSetup Instructions:")
         log.error("1. Go to https://console.cloud.google.com/")
@@ -251,25 +374,32 @@ def main():
         log.error("4. Enable Google Sheets API in your project")
         log.error("5. Share your spreadsheet with the service account email")
         sys.exit(1)
-    except ValueError as e:
-        log.error(f"Authentication error: {e}")
-        sys.exit(1)
     except Exception as e:
-        log.error(f"Failed to authenticate: {e}", exc_info=True)
+        logger.log_error_with_context(
+            log,
+            f"Failed to authenticate: {e}",
+            exception=e,
+            context={'service_account_file': args.service_account}
+        )
         sys.exit(1)
     
     log.info(f"Reading URLs from spreadsheet tab '{args.tab}'...")
     try:
         urls = sheets_client.read_urls(args.spreadsheet_id, args.tab, service=service)
         log.info(f"Successfully read URLs from spreadsheet")
-    except ValueError as e:
-        log.error(f"\n{e}")
-        sys.exit(1)
-    except PermissionError as e:
+    except PermanentError as e:
         log.error(f"\n{e}")
         sys.exit(1)
     except Exception as e:
-        log.error(f"Failed to read URLs: {e}", exc_info=True)
+        logger.log_error_with_context(
+            log,
+            f"Failed to read URLs: {e}",
+            exception=e,
+            context={
+                'spreadsheet_id': args.spreadsheet_id,
+                'tab_name': args.tab
+            }
+        )
         sys.exit(1)
     
     if not urls:
@@ -309,11 +439,24 @@ def main():
                 except Exception as e:
                     url_data = futures[future]
                     with log_lock:
-                        log.error(f"Unexpected error processing {url_data[1]}: {e}", exc_info=True)
+                        logger.log_error_with_context(
+                            log,
+                            f"Unexpected error processing {url_data[1]}: {e}",
+                            exception=e,
+                            context={'url': url_data[1], 'row': url_data[0]}
+                        )
+                    metrics.record_error(
+                        error_type=type(e).__name__,
+                        function_name='process_url',
+                        error_message=str(e),
+                        is_retryable=False,
+                        traceback=traceback.format_exc()
+                    )
                     results.append({
                         'row': url_data[0],
                         'url': url_data[1],
-                        'error': str(e)
+                        'error': str(e),
+                        'error_type': 'unexpected'
                     })
         except KeyboardInterrupt:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -349,10 +492,19 @@ def main():
     
     if failed > 0:
         log.info("Failed URLs:")
+        error_types = {}
         for r in results:
             if 'error' in r:
+                error_type = r.get('error_type', 'unknown')
+                error_types[error_type] = error_types.get(error_type, 0) + 1
                 log.info(f"  Row {r['row']}: {r['url']}")
+                log.info(f"    Error Type: {error_type}")
                 log.info(f"    Error: {r['error']}")
+        
+        log.info("")
+        log.info("Error Types Summary:")
+        for error_type, count in sorted(error_types.items(), key=lambda x: x[1], reverse=True):
+            log.info(f"  {error_type}: {count}")
         log.info("")
     
     if mobile_pass > 0 or desktop_pass > 0:
@@ -361,6 +513,9 @@ def main():
         log.info(f"PSI URLs for failing scores written to columns {MOBILE_COLUMN} (mobile) and {DESKTOP_COLUMN} (desktop).")
     
     log.info("=" * 80)
+    
+    log.info("")
+    metrics.print_summary()
 
 
 if __name__ == '__main__':
