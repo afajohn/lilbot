@@ -1,0 +1,60 @@
+# Example configuration file for run_audit.py
+# Use with: python run_audit.py --config config.yaml
+
+# Required: Spreadsheet tab name
+tab: "Production URLs"
+
+# Optional: Google Spreadsheet ID (defaults to built-in value if not specified)
+# spreadsheet-id: "1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I"
+
+# Optional: Service account JSON file path
+# service-account: "service-account.json"
+
+# Optional: Timeout in seconds for each Cypress run
+timeout: 600
+
+# Optional: Number of concurrent workers (1-5)
+concurrency: 3
+
+# Optional: Skip cache and force fresh analysis
+# skip-cache: true
+
+# Optional: URL whitelist patterns
+# whitelist:
+#   - "https://example.com/*"
+#   - "https://*.domain.com/*"
+
+# Optional: URL blacklist patterns
+# blacklist:
+#   - "http://*"
+#   - "https://blocked.com/*"
+
+# Optional: Dry run mode (simulate without changes)
+# dry-run: true
+
+# Optional: DNS resolution timeout in seconds
+dns-timeout: 5.0
+
+# Optional: Redirect check timeout in seconds
+redirect-timeout: 10.0
+
+# Optional: Skip DNS validation
+# skip-dns-validation: true
+
+# Optional: Skip redirect validation
+# skip-redirect-validation: true
+
+# Optional: Resume from specific row number
+# resume-from-row: 50
+
+# Optional: Process only URLs matching this regex pattern
+# filter: "https://example\\.com/.*"
+
+# Optional: Export results to JSON file
+# export-json: "results.json"
+
+# Optional: Export results to CSV file
+# export-csv: "results.csv"
+
+# Optional: Disable progress bar (useful for logging)
+# no-progress-bar: true

@@ -97,3 +97,15 @@ api_docs/
 
 # Documentation backups
 *.backup
+
+# Result exports
+results.json
+results.csv
+audit_results_*.json
+audit_results_*.csv
+
+# User config files
+config.yaml
+config.yml
+audit-config.yaml
+audit-config.yml

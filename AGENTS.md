@@ -23,21 +23,47 @@ python list_tabs.py --spreadsheet-id "YOUR_ID" --service-account "service-accoun
 
 **Run Audit:**
 ```bash
+# Basic usage
 python run_audit.py --tab "TAB_NAME" --service-account "service-account.json"
+
+# Check version
+python run_audit.py --version
+
+# Use config file to avoid long CLI arguments
+python run_audit.py --config config.yaml
+
 # Optional: Specify custom timeout (default: 600 seconds)
 python run_audit.py --tab "TAB_NAME" --timeout 1200
+
 # Optional: Skip cache for fresh analysis
 python run_audit.py --tab "TAB_NAME" --skip-cache
+
 # Optional: Dry run mode (simulate without changes)
 python run_audit.py --tab "TAB_NAME" --dry-run
-# Optional: URL filtering
+
+# Optional: URL filtering (whitelist/blacklist)
 python run_audit.py --tab "TAB_NAME" --whitelist "https://example.com/*" --blacklist "http://*"
+
+# Optional: Resume from specific row (for interrupted audits)
+python run_audit.py --tab "TAB_NAME" --resume-from-row 50
+
+# Optional: Process only URLs matching regex pattern
+python run_audit.py --tab "TAB_NAME" --filter "https://example\.com/.*"
+
+# Optional: Export results to JSON or CSV
+python run_audit.py --tab "TAB_NAME" --export-json results.json --export-csv results.csv
+
 # Optional: Validation only mode (no audit execution)
 python run_audit.py --tab "TAB_NAME" --validate-only
+
 # Optional: Skip DNS and redirect validation
 python run_audit.py --tab "TAB_NAME" --skip-dns-validation --skip-redirect-validation
+
 # Optional: Custom DNS and redirect timeouts
 python run_audit.py --tab "TAB_NAME" --dns-timeout 10 --redirect-timeout 15
+
+# Optional: Disable progress bar (useful for logging/CI)
+python run_audit.py --tab "TAB_NAME" --no-progress-bar
 ```
 
 **Validate Service Account:**
@@ -109,6 +135,8 @@ python -m pytest  # Or use run_tests.ps1 (Windows) or ./run_tests.sh (Unix)
   - `google-auth` - Authentication
   - `redis` - Redis caching backend (optional)
   - `plotly` - Interactive dashboard charts
+  - `tqdm` - Progress bars for better UX
+  - `pyyaml` - YAML configuration file support
   - Cypress - Browser automation for PageSpeed Insights
 
 ## Performance Optimizations
@@ -377,6 +405,106 @@ Useful for:
 - Identifying data quality issues
 - Testing URL accessibility
 - Detecting redirect chains
+
+## CLI Enhancements
+
+### Resume from Specific Row
+
+Resume an interrupted audit from a specific row number:
+
+```bash
+python run_audit.py --tab "TAB_NAME" --resume-from-row 50
+```
+
+This will skip all URLs before row 50 and continue from there. Useful for:
+- Recovering from interrupted audits
+- Re-running only the remaining URLs after fixing issues
+- Processing large spreadsheets in batches
+
+### Filter URLs by Regex Pattern
+
+Process only URLs matching a regex pattern:
+
+```bash
+python run_audit.py --tab "TAB_NAME" --filter "https://example\.com/products/.*"
+```
+
+The filter is applied as a regex search on the URL string. Useful for:
+- Auditing specific subsets of URLs (e.g., only product pages)
+- Testing changes on specific URL patterns
+- Splitting large audits by URL pattern
+
+### Export Results
+
+Export audit results to JSON or CSV format:
+
+```bash
+# Export to JSON
+python run_audit.py --tab "TAB_NAME" --export-json results.json
+
+# Export to CSV
+python run_audit.py --tab "TAB_NAME" --export-csv results.csv
+
+# Export to both formats
+python run_audit.py --tab "TAB_NAME" --export-json results.json --export-csv results.csv
+```
+
+Exported data includes:
+- Row numbers
+- URLs processed
+- Mobile and desktop scores
+- PSI URLs
+- Error information (if any)
+- Skip/validation status
+
+### Configuration File Support
+
+Use a YAML configuration file to avoid long command-line arguments:
+
+```bash
+# Create a config file (config.yaml)
+# See config.example.yaml for all options
+python run_audit.py --config config.yaml
+```
+
+Example `config.yaml`:
+```yaml
+tab: "Production URLs"
+timeout: 600
+concurrency: 3
+export-json: "results.json"
+export-csv: "results.csv"
+resume-from-row: 50
+filter: "https://example\\.com/.*"
+```
+
+CLI arguments override config file values, so you can use the config for defaults and override specific options:
+
+```bash
+python run_audit.py --config config.yaml --concurrency 5
+```
+
+### Progress Bar
+
+A visual progress bar is displayed by default using `tqdm`:
+
+```
+Processing URLs: 45%|████████████████          | 45/100 [02:15<02:45, 0.33url/s]
+```
+
+To disable the progress bar (useful for logging or CI environments):
+
+```bash
+python run_audit.py --tab "TAB_NAME" --no-progress-bar
+```
+
+### Version Information
+
+Check the tool version:
+
+```bash
+python run_audit.py --version
+```
 
 ## Configuration
 
