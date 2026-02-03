@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
 from sheets import sheets_client
 from sheets.schema_validator import SpreadsheetSchemaValidator
 from sheets.data_quality_checker import DataQualityChecker
-from qa import cypress_runner
+from qa import playwright_runner
 from utils import logger
 from utils.error_metrics import get_global_metrics
 from utils.exceptions import RetryableError, PermanentError
@@ -222,7 +222,7 @@ def process_url(
         }
     
     try:
-        result = cypress_runner.run_analysis(sanitized_url, timeout=timeout, skip_cache=skip_cache)
+        result = playwright_runner.run_analysis(sanitized_url, timeout=timeout, skip_cache=skip_cache)
         
         mobile_score = result.get('mobile_score')
         desktop_score = result.get('desktop_score')
@@ -312,7 +312,7 @@ def process_url(
             'desktop_psi_url': desktop_psi_url
         }
         
-    except cypress_runner.CypressTimeoutError as e:
+    except playwright_runner.PlaywrightTimeoutError as e:
         error_msg = f"Timeout - {e}"
         if progress_bar:
             progress_bar.set_description(f"Timeout (row {row_index})")
@@ -328,7 +328,7 @@ def process_url(
                 log.error(f"Failed to analyze {url} due to timeout", exc_info=True)
                 log.info("")
         metrics.record_error(
-            error_type='CypressTimeoutError',
+            error_type='PlaywrightTimeoutError',
             function_name='process_url',
             error_message=str(e),
             is_retryable=False,
@@ -342,10 +342,10 @@ def process_url(
             'error_type': 'timeout'
         }
         
-    except cypress_runner.CypressRunnerError as e:
-        error_msg = f"Cypress failed - {e}"
+    except playwright_runner.PlaywrightRunnerError as e:
+        error_msg = f"Playwright failed - {e}"
         if progress_bar:
-            progress_bar.set_description(f"Cypress error (row {row_index})")
+            progress_bar.set_description(f"Playwright error (row {row_index})")
             progress_bar.update(1)
         else:
             with log_lock:
@@ -355,21 +355,21 @@ def process_url(
                     exception=e,
                     context={'url': url, 'row': row_index}
                 )
-                log.error(f"Failed to analyze {url} due to Cypress error", exc_info=True)
+                log.error(f"Failed to analyze {url} due to Playwright error", exc_info=True)
                 log.info("")
         metrics.record_error(
-            error_type='CypressRunnerError',
+            error_type='PlaywrightRunnerError',
             function_name='process_url',
             error_message=str(e),
             is_retryable=True,
             traceback=traceback.format_exc()
         )
-        metrics_collector.record_url_failure(start_time, reason='cypress')
+        metrics_collector.record_url_failure(start_time, reason='playwright')
         return {
             'row': row_index,
             'url': url,
             'error': str(e),
-            'error_type': 'cypress'
+            'error_type': 'playwright'
         }
         
     except PermanentError as e:
@@ -983,11 +983,11 @@ def main():
     log.info("Metrics saved to metrics.json and metrics.prom")
     log.info("Generate HTML dashboard with: python generate_report.py")
     
-    cypress_runner.shutdown_pool()
+    playwright_runner.shutdown_pool()
 
 
 if __name__ == '__main__':
     try:
         main()
     finally:
-        cypress_runner.shutdown_pool()
+        playwright_runner.shutdown_pool()
