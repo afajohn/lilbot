@@ -7,6 +7,7 @@ from typing import Dict, Optional, Set, List
 from dataclasses import dataclass, field
 from enum import Enum
 from queue import Queue, Empty
+from datetime import datetime
 
 try:
     from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, Route, Request
@@ -26,7 +27,13 @@ class PlaywrightRunnerError(Exception):
     pass
 
 
-class PlaywrightTimeoutError(PlaywrightRunnerError):
+class PlaywrightAnalysisTimeoutError(PlaywrightRunnerError):
+    """Timeout during analysis - should abort, not retry"""
+    pass
+
+
+class PlaywrightSelectorTimeoutError(PlaywrightRunnerError):
+    """Timeout finding selectors - should retry with fresh page load"""
     pass
 
 
@@ -65,6 +72,252 @@ BLOCKED_URL_PATTERNS = [
     'beacon',
     'telemetry'
 ]
+
+
+DEBUG_MODE = False
+DEBUG_SCREENSHOTS_DIR = 'debug_screenshots'
+
+
+def set_debug_mode(enabled: bool):
+    """Enable or disable debug mode globally"""
+    global DEBUG_MODE
+    DEBUG_MODE = enabled
+    if enabled and not os.path.exists(DEBUG_SCREENSHOTS_DIR):
+        os.makedirs(DEBUG_SCREENSHOTS_DIR, exist_ok=True)
+
+
+def get_debug_mode() -> bool:
+    """Check if debug mode is enabled"""
+    return DEBUG_MODE
+
+
+def _get_timestamp_filename(url: str, suffix: str = "") -> str:
+    """
+    Generate a filename with timestamp and sanitized URL.
+    
+    Args:
+        url: The URL being processed
+        suffix: Optional suffix for the filename (e.g., 'error', 'screenshot')
+        
+    Returns:
+        Sanitized filename with timestamp
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    
+    sanitized_url = url.replace('https://', '').replace('http://', '')
+    sanitized_url = ''.join(c if c.isalnum() or c in ('-', '_', '.') else '_' for c in sanitized_url)
+    sanitized_url = sanitized_url[:100]
+    
+    if suffix:
+        return f"{timestamp}_{sanitized_url}_{suffix}"
+    return f"{timestamp}_{sanitized_url}"
+
+
+def _save_debug_screenshot(page: Page, url: str, reason: str = "error") -> Optional[str]:
+    """
+    Capture and save a screenshot for debugging purposes.
+    
+    Args:
+        page: Playwright page object
+        url: The URL being analyzed
+        reason: Reason for screenshot (e.g., 'error', 'timeout')
+        
+    Returns:
+        Path to saved screenshot or None if failed
+    """
+    try:
+        if not os.path.exists(DEBUG_SCREENSHOTS_DIR):
+            os.makedirs(DEBUG_SCREENSHOTS_DIR, exist_ok=True)
+        
+        filename = _get_timestamp_filename(url, f"screenshot_{reason}")
+        filepath = os.path.join(DEBUG_SCREENSHOTS_DIR, f"{filename}.png")
+        
+        page.screenshot(path=filepath, full_page=True)
+        return filepath
+    except Exception as e:
+        logger = get_logger()
+        logger.debug(f"Failed to save screenshot: {e}")
+        return None
+
+
+def _save_debug_html(page: Page, url: str, reason: str = "error") -> Optional[str]:
+    """
+    Save page HTML for debugging purposes.
+    
+    Args:
+        page: Playwright page object
+        url: The URL being analyzed
+        reason: Reason for saving HTML (e.g., 'error', 'timeout')
+        
+    Returns:
+        Path to saved HTML file or None if failed
+    """
+    try:
+        if not os.path.exists(DEBUG_SCREENSHOTS_DIR):
+            os.makedirs(DEBUG_SCREENSHOTS_DIR, exist_ok=True)
+        
+        filename = _get_timestamp_filename(url, f"page_{reason}")
+        filepath = os.path.join(DEBUG_SCREENSHOTS_DIR, f"{filename}.html")
+        
+        html_content = page.content()
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        return filepath
+    except Exception as e:
+        logger = get_logger()
+        logger.debug(f"Failed to save HTML: {e}")
+        return None
+
+
+def _get_page_info(page: Page) -> Dict[str, any]:
+    """
+    Extract diagnostic information from the current page.
+    
+    Args:
+        page: Playwright page object
+        
+    Returns:
+        Dictionary containing page URL, title, and available buttons/elements
+    """
+    info = {
+        'url': None,
+        'title': None,
+        'buttons': [],
+        'inputs': [],
+        'links': []
+    }
+    
+    try:
+        info['url'] = page.url
+    except Exception:
+        pass
+    
+    try:
+        info['title'] = page.title()
+    except Exception:
+        pass
+    
+    try:
+        buttons = page.locator('button').all()
+        info['buttons'] = [
+            {
+                'text': btn.inner_text()[:50] if btn.is_visible() else '[hidden]',
+                'visible': btn.is_visible()
+            }
+            for btn in buttons[:10]
+        ]
+    except Exception:
+        pass
+    
+    try:
+        inputs = page.locator('input').all()
+        info['inputs'] = [
+            {
+                'type': inp.get_attribute('type'),
+                'placeholder': inp.get_attribute('placeholder'),
+                'visible': inp.is_visible()
+            }
+            for inp in inputs[:10]
+        ]
+    except Exception:
+        pass
+    
+    try:
+        links = page.locator('a').all()
+        info['links'] = [
+            {
+                'text': link.inner_text()[:50] if link.is_visible() else '[hidden]',
+                'href': link.get_attribute('href'),
+                'visible': link.is_visible()
+            }
+            for link in links[:10]
+        ]
+    except Exception:
+        pass
+    
+    return info
+
+
+def _create_enhanced_error_message(
+    base_message: str,
+    url: str,
+    page: Optional[Page] = None,
+    last_successful_step: Optional[str] = None,
+    screenshot_path: Optional[str] = None,
+    html_path: Optional[str] = None
+) -> str:
+    """
+    Create an enhanced error message with debugging context.
+    
+    Args:
+        base_message: Original error message
+        url: URL being analyzed
+        page: Playwright page object (optional)
+        last_successful_step: Description of last successful step (optional)
+        screenshot_path: Path to debug screenshot (optional)
+        html_path: Path to saved HTML (optional)
+        
+    Returns:
+        Enhanced error message with context
+    """
+    parts = [base_message]
+    
+    if last_successful_step:
+        parts.append(f"\nLast successful step: {last_successful_step}")
+    
+    if page:
+        page_info = _get_page_info(page)
+        
+        if page_info['url']:
+            parts.append(f"\nCurrent page URL: {page_info['url']}")
+        
+        if page_info['title']:
+            parts.append(f"Page title: {page_info['title']}")
+        
+        if page_info['buttons']:
+            parts.append("\nAvailable buttons:")
+            for i, btn in enumerate(page_info['buttons'][:5], 1):
+                visibility = "visible" if btn['visible'] else "hidden"
+                parts.append(f"  {i}. {btn['text']} ({visibility})")
+        
+        if page_info['inputs']:
+            parts.append("\nAvailable inputs:")
+            for i, inp in enumerate(page_info['inputs'][:5], 1):
+                visibility = "visible" if inp['visible'] else "hidden"
+                inp_type = inp['type'] or 'text'
+                placeholder = inp['placeholder'] or ''
+                parts.append(f"  {i}. {inp_type} input ({visibility}) - {placeholder}")
+    
+    if screenshot_path:
+        parts.append(f"\nDebug screenshot saved: {screenshot_path}")
+    
+    if html_path:
+        parts.append(f"Debug HTML saved: {html_path}")
+    
+    return '\n'.join(parts)
+
+
+@dataclass
+class PageReloadTracker:
+    """Track page reload attempts for recovery logic"""
+    reload_count: int = 0
+    max_reloads: int = 3
+    last_reload_time: float = 0.0
+    
+    def should_reload(self) -> bool:
+        """Check if another reload attempt should be made"""
+        return self.reload_count < self.max_reloads
+    
+    def record_reload(self):
+        """Record a reload attempt"""
+        self.reload_count += 1
+        self.last_reload_time = time.time()
+    
+    def reset(self):
+        """Reset reload counter"""
+        self.reload_count = 0
+        self.last_reload_time = 0.0
 
 
 def should_block_resource(url: str, resource_type: str) -> bool:
@@ -231,22 +484,31 @@ class PlaywrightPool:
     
     def create_instance(self) -> PlaywrightInstance:
         startup_start = time.time()
+        logger = self.logger
+        
         try:
             pw = self._get_playwright()
+            
+            launch_args = [
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--disable-extensions',
+                '--disable-plugins',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process'
+            ]
+            
+            if DEBUG_MODE:
+                logger.debug("Creating Playwright instance with verbose logging enabled")
+            
             browser = pw.chromium.launch(
                 headless=True,
-                args=[
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--disable-extensions',
-                    '--disable-plugins',
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-web-security',
-                    '--disable-features=IsolateOrigins,site-per-process'
-                ]
+                args=launch_args
             )
+            
             context = browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -279,7 +541,7 @@ class PlaywrightPool:
                 self._total_cold_starts += 1
                 self._total_startup_time += startup_time
             
-            self.logger.info(f"Created new Playwright instance (PID: {pid}, startup time: {startup_time:.2f}s)")
+            logger.info(f"Created new Playwright instance (PID: {pid}, startup time: {startup_time:.2f}s)")
             return instance
         except Exception as e:
             raise PermanentError(f"Failed to create Playwright instance: {e}", original_exception=e)
@@ -425,16 +687,16 @@ def _setup_request_interception(page: Page, instance: PlaywrightInstance) -> Non
         page.route('**/*', handle_route)
 
 
-def run_analysis(url: str, timeout: int = 600, max_retries: int = 3, skip_cache: bool = False) -> Dict[str, Optional[int | str]]:
+def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_retry: bool = False) -> Dict[str, Optional[int | str]]:
     """
     Run Playwright analysis for a given URL to get PageSpeed Insights scores.
-    Includes circuit breaker protection, error metrics collection, caching, and optimizations.
+    Implements persistent retry-until-success with exponential backoff for transient errors.
     
     Args:
         url: The URL to analyze
-        timeout: Maximum time in seconds to wait for analysis to complete (default: 600)
-        max_retries: Maximum number of retry attempts for transient errors (default: 3)
+        timeout: Maximum time in seconds for overall operation (default: 600)
         skip_cache: If True, bypass cache and force fresh analysis (default: False)
+        force_retry: If True, bypass circuit breaker during critical runs (default: False)
         
     Returns:
         Dictionary with keys:
@@ -444,8 +706,7 @@ def run_analysis(url: str, timeout: int = 600, max_retries: int = 3, skip_cache:
             - desktop_psi_url: URL to desktop PSI report (if score < 80, else None)
             
     Raises:
-        PlaywrightRunnerError: If Playwright execution fails
-        PlaywrightTimeoutError: If analysis exceeds timeout
+        PlaywrightAnalysisTimeoutError: If overall analysis exceeds timeout (not retryable)
         PermanentError: If there's a permanent error (e.g., Playwright not installed)
     """
     if not PLAYWRIGHT_AVAILABLE:
@@ -478,12 +739,26 @@ def run_analysis(url: str, timeout: int = 600, max_retries: int = 3, skip_cache:
     if timeout < effective_timeout:
         timeout = effective_timeout
     
+    overall_start_time = time.time()
     last_exception = None
     was_retried = False
+    attempt = 0
+    initial_backoff = 5
+    max_backoff = 60
+    current_backoff = initial_backoff
     
-    for attempt in range(max_retries + 1):
+    while True:
+        attempt += 1
+        
+        if time.time() - overall_start_time >= timeout:
+            elapsed = time.time() - overall_start_time
+            logger.error(f"Overall analysis timeout after {elapsed:.1f}s for {url}")
+            metrics.record_failure('run_analysis')
+            progressive_timeout.record_failure()
+            raise PlaywrightAnalysisTimeoutError(f"Analysis exceeded overall timeout of {timeout}s")
+        
         try:
-            result = _run_analysis_once(url, timeout)
+            result = _run_analysis_once(url, timeout, force_retry=force_retry)
             metrics.record_success('run_analysis', was_retried=was_retried)
             metrics_collector.record_api_call_cypress()
             progressive_timeout.record_success()
@@ -499,54 +774,69 @@ def run_analysis(url: str, timeout: int = 600, max_retries: int = 3, skip_cache:
             progressive_timeout.record_failure()
             raise
             
-        except PlaywrightTimeoutError as e:
-            last_exception = e
-            progressive_timeout.record_failure()
-            metrics.record_error(
-                error_type='PlaywrightTimeoutError',
-                function_name='run_analysis',
-                error_message=str(e),
-                is_retryable=False,
-                attempt=attempt + 1,
-                traceback=traceback.format_exc()
-            )
+        except PlaywrightAnalysisTimeoutError:
             metrics.record_failure('run_analysis')
+            progressive_timeout.record_failure()
             raise
             
-        except (PlaywrightRunnerError, Exception) as e:
+        except PlaywrightSelectorTimeoutError as e:
             last_exception = e
             was_retried = True
             progressive_timeout.record_failure()
             
             metrics.record_error(
-                error_type=type(e).__name__,
+                error_type='PlaywrightSelectorTimeoutError',
                 function_name='run_analysis',
                 error_message=str(e),
                 is_retryable=True,
-                attempt=attempt + 1,
+                attempt=attempt,
                 traceback=traceback.format_exc()
             )
             
-            if attempt < max_retries:
-                wait_time = 5
-                logger.warning(
-                    f"Retrying analysis for {url} after error (attempt {attempt + 1}/{max_retries + 1})",
-                    extra={
-                        'url': url,
-                        'attempt': attempt + 1,
-                        'error_type': type(e).__name__,
-                        'retry_delay': wait_time
-                    }
-                )
-                time.sleep(wait_time)
-                continue
-            else:
-                metrics.record_failure('run_analysis')
-                raise
-    
-    if last_exception:
-        metrics.record_failure('run_analysis')
-        raise last_exception
+            logger.warning(
+                f"Selector timeout for {url}, retrying with fresh page load (attempt {attempt})",
+                extra={
+                    'url': url,
+                    'attempt': attempt,
+                    'error_type': 'PlaywrightSelectorTimeoutError',
+                    'retry_delay': current_backoff
+                }
+            )
+            
+            time.sleep(current_backoff)
+            current_backoff = min(current_backoff * 2, max_backoff)
+            continue
+            
+        except (PlaywrightRunnerError, RetryableError, Exception) as e:
+            last_exception = e
+            was_retried = True
+            progressive_timeout.record_failure()
+            
+            is_retryable = not isinstance(e, PermanentError)
+            
+            metrics.record_error(
+                error_type=type(e).__name__,
+                function_name='run_analysis',
+                error_message=str(e),
+                is_retryable=is_retryable,
+                attempt=attempt,
+                traceback=traceback.format_exc()
+            )
+            
+            logger.warning(
+                f"Retryable error for {url}, retrying (attempt {attempt})",
+                extra={
+                    'url': url,
+                    'attempt': attempt,
+                    'error_type': type(e).__name__,
+                    'retry_delay': current_backoff,
+                    'error_message': str(e)
+                }
+            )
+            
+            time.sleep(current_backoff)
+            current_backoff = min(current_backoff * 2, max_backoff)
+            continue
 
 
 def _monitor_process_memory(instance: PlaywrightInstance, max_memory_mb: float = 1024) -> bool:
@@ -554,12 +844,179 @@ def _monitor_process_memory(instance: PlaywrightInstance, max_memory_mb: float =
     return memory_mb >= max_memory_mb
 
 
-def _wait_for_analysis_completion(page: Page, timeout_seconds: int = 180) -> bool:
+def _reload_page_with_retry(page: Page, url: str, reload_tracker: PageReloadTracker, logger) -> bool:
     """
-    Smart polling to wait for PageSpeed Insights analysis to complete.
+    Reload the page with retry logic.
     
     Args:
         page: Playwright page object
+        url: URL to reload
+        reload_tracker: PageReloadTracker to track reload attempts
+        logger: Logger instance
+        
+    Returns:
+        True if reload successful, False otherwise
+    """
+    if not reload_tracker.should_reload():
+        logger.error(f"Maximum page reload attempts ({reload_tracker.max_reloads}) reached")
+        return False
+    
+    try:
+        reload_tracker.record_reload()
+        logger.info(f"Reloading page (attempt {reload_tracker.reload_count}/{reload_tracker.max_reloads})...")
+        page.reload(wait_until='domcontentloaded', timeout=30000)
+        time.sleep(2)
+        return True
+    except Exception as e:
+        logger.error(f"Page reload failed: {e}")
+        return False
+
+
+def _click_analyze_button(page: Page, url: str, reload_tracker: PageReloadTracker, timeout_ms: int = 10000) -> bool:
+    """
+    Click the Analyze button using multiple selector strategies with retry logic and page reload on failure.
+    
+    Args:
+        page: Playwright page object
+        url: URL being analyzed (for error reporting)
+        reload_tracker: PageReloadTracker for page reload logic
+        timeout_ms: Timeout in milliseconds for each selector attempt
+        
+    Returns:
+        True if button was clicked successfully, False otherwise
+        
+    Raises:
+        PlaywrightSelectorTimeoutError: If all selectors fail after retries
+    """
+    logger = get_logger()
+    
+    selectors = [
+        'button:has-text("Analyze")',
+        '[aria-label*="Analyze"]',
+        'button.lh-button--primary',
+        'button[type="submit"]',
+        'button:has-text("analyze")',
+        '[aria-label*="analyze"]',
+        'button.analyze-button',
+        'button[class*="analyze"]',
+        'button[class*="primary"]',
+        'form button[type="submit"]'
+    ]
+    
+    max_attempts = 2
+    
+    for attempt in range(max_attempts):
+        for i, selector in enumerate(selectors, 1):
+            try:
+                if DEBUG_MODE:
+                    logger.debug(f"Attempting to click analyze button with selector {i}/{len(selectors)}: {selector}")
+                
+                button = page.locator(selector).first
+                button.click(timeout=timeout_ms)
+                logger.info(f"Successfully clicked analyze button using selector: {selector}")
+                return True
+            except Exception as e:
+                if DEBUG_MODE:
+                    logger.debug(f"Selector {selector} failed: {e}")
+                continue
+        
+        if attempt < max_attempts - 1:
+            logger.warning(f"All analyze button selectors failed on attempt {attempt + 1}, reloading page...")
+            
+            screenshot_path = None
+            html_path = None
+            if DEBUG_MODE or get_debug_mode():
+                screenshot_path = _save_debug_screenshot(page, url, "button_not_found")
+                html_path = _save_debug_html(page, url, "button_not_found")
+            
+            if not _reload_page_with_retry(page, url, reload_tracker, logger):
+                error_msg = _create_enhanced_error_message(
+                    f"Failed to click analyze button after {max_attempts} attempts - all selectors failed",
+                    url,
+                    page=page,
+                    last_successful_step="Navigated to PageSpeed Insights and entered URL",
+                    screenshot_path=screenshot_path,
+                    html_path=html_path
+                )
+                raise PlaywrightSelectorTimeoutError(error_msg)
+    
+    screenshot_path = None
+    html_path = None
+    if DEBUG_MODE or get_debug_mode():
+        screenshot_path = _save_debug_screenshot(page, url, "button_not_found_final")
+        html_path = _save_debug_html(page, url, "button_not_found_final")
+    
+    error_msg = _create_enhanced_error_message(
+        f"Failed to click analyze button after {max_attempts} attempts - all selectors failed",
+        url,
+        page=page,
+        last_successful_step="Navigated to PageSpeed Insights and entered URL",
+        screenshot_path=screenshot_path,
+        html_path=html_path
+    )
+    raise PlaywrightSelectorTimeoutError(error_msg)
+
+
+def _wait_for_device_buttons(page: Page, url: str, reload_tracker: PageReloadTracker, timeout_seconds: int = 30) -> bool:
+    """
+    Poll for mobile and desktop buttons to appear on PageSpeed Insights page.
+    Uses multiple selector strategies to maximize detection success.
+    
+    Args:
+        page: Playwright page object
+        url: URL being analyzed
+        reload_tracker: PageReloadTracker for page reload logic
+        timeout_seconds: Maximum time to wait (default: 30)
+        
+    Returns:
+        True if buttons are found and visible, False if timeout
+    """
+    logger = get_logger()
+    start_time = time.time()
+    poll_interval = 1
+    
+    button_selectors = [
+        'button:has-text("Mobile")',
+        'button:has-text("Desktop")',
+        '[role="tab"]:has-text("Mobile")',
+        '[role="tab"]:has-text("Desktop")'
+    ]
+    
+    while time.time() - start_time < timeout_seconds:
+        for selector in button_selectors:
+            try:
+                button = page.locator(selector).first
+                if button.is_visible(timeout=500):
+                    if DEBUG_MODE:
+                        logger.debug(f"Found device button using selector: {selector}")
+                    return True
+            except Exception:
+                continue
+        
+        time.sleep(poll_interval)
+    
+    logger.warning(f"Device buttons not found within {timeout_seconds}s timeout")
+    
+    if DEBUG_MODE or get_debug_mode():
+        screenshot_path = _save_debug_screenshot(page, url, "device_buttons_timeout")
+        html_path = _save_debug_html(page, url, "device_buttons_timeout")
+        if screenshot_path:
+            logger.info(f"Debug screenshot saved: {screenshot_path}")
+        if html_path:
+            logger.info(f"Debug HTML saved: {html_path}")
+    
+    return False
+
+
+def _wait_for_analysis_completion(page: Page, url: str, reload_tracker: PageReloadTracker, timeout_seconds: int = 180) -> bool:
+    """
+    Smart polling to wait for PageSpeed Insights analysis to complete.
+    Waits for mobile/desktop buttons to appear before proceeding.
+    
+    Args:
+        page: Playwright page object
+        url: URL being analyzed
+        reload_tracker: PageReloadTracker for page reload logic
         timeout_seconds: Maximum time to wait (default: 180)
         
     Returns:
@@ -576,48 +1033,132 @@ def _wait_for_analysis_completion(page: Page, timeout_seconds: int = 180) -> boo
                 score_elements = page.locator('[data-testid="score-gauge"]').all()
             
             if len(score_elements) >= 1:
-                logger.debug(f"Found {len(score_elements)} score elements")
-                return True
+                if DEBUG_MODE:
+                    logger.debug(f"Found {len(score_elements)} score elements")
+                
+                try:
+                    mobile_button = page.locator('button:has-text("Mobile"), [role="tab"]:has-text("Mobile")').first
+                    desktop_button = page.locator('button:has-text("Desktop"), [role="tab"]:has-text("Desktop")').first
+                    
+                    mobile_visible = mobile_button.is_visible(timeout=1000)
+                    desktop_visible = desktop_button.is_visible(timeout=1000)
+                    
+                    if mobile_visible or desktop_visible:
+                        if DEBUG_MODE:
+                            logger.debug(f"Mobile/Desktop buttons are visible (mobile: {mobile_visible}, desktop: {desktop_visible})")
+                        return True
+                    else:
+                        if DEBUG_MODE:
+                            logger.debug("Score elements found but mobile/desktop buttons not yet visible, continuing to poll...")
+                except Exception as e:
+                    if DEBUG_MODE:
+                        logger.debug(f"Mobile/Desktop buttons not yet visible: {e}")
             
         except Exception as e:
-            logger.debug(f"Polling error: {e}")
+            if DEBUG_MODE:
+                logger.debug(f"Polling error: {e}")
         
         time.sleep(poll_interval)
+    
+    logger.warning(f"Analysis completion timeout after {timeout_seconds}s")
+    
+    if DEBUG_MODE or get_debug_mode():
+        screenshot_path = _save_debug_screenshot(page, url, "analysis_timeout")
+        html_path = _save_debug_html(page, url, "analysis_timeout")
+        if screenshot_path:
+            logger.info(f"Debug screenshot saved: {screenshot_path}")
+        if html_path:
+            logger.info(f"Debug HTML saved: {html_path}")
     
     return False
 
 
-def _extract_score_from_element(page: Page, view_type: str) -> Optional[int]:
+def _extract_score_from_element(page: Page, view_type: str, url: str, max_retries: int = 5, retry_delay: float = 1.0) -> Optional[int]:
     """
-    Extract score from PageSpeed Insights page for given view type.
+    Extract score from PageSpeed Insights page for given view type with enhanced reliability.
+    
+    Implements retry logic with delays to handle cases where score elements exist but are not yet populated.
+    Validates that extracted scores are valid integers between 0-100.
+    Uses multiple fallback selectors including text content parsing from gauge elements.
     
     Args:
         page: Playwright page object
         view_type: 'mobile' or 'desktop'
+        url: URL being analyzed (for error reporting)
+        max_retries: Maximum number of retry attempts (default: 5)
+        retry_delay: Delay in seconds between retries (default: 1.0)
         
     Returns:
-        Score as integer (0-100) or None if not found
+        Score as integer (0-100) or None if not found after all retries
     """
     logger = get_logger()
     
-    selectors = [
+    primary_selectors = [
         '.lh-exp-gauge__percentage',
-        '[data-testid="score-gauge"]',
-        '.lh-gauge__percentage',
-        '[class*="gauge"] [class*="percentage"]'
+        '.lh-gauge__percentage'
     ]
     
-    for selector in selectors:
-        try:
-            elements = page.locator(selector).all()
-            if elements:
+    fallback_selectors = [
+        '[data-testid="lh-gauge"]',
+        '[data-testid="score-gauge"]',
+        '.lh-gauge__wrapper .lh-gauge__percentage',
+        '.lh-exp-gauge__wrapper .lh-exp-gauge__percentage',
+        '[class*="gauge"][class*="percentage"]',
+        '[class*="score"][class*="value"]'
+    ]
+    
+    all_selectors = primary_selectors + fallback_selectors
+    
+    for attempt in range(max_retries):
+        for selector in all_selectors:
+            try:
+                elements = page.locator(selector).all()
+                if not elements:
+                    continue
+                
                 score_text = elements[0].inner_text().strip()
-                score = int(score_text)
-                logger.debug(f"Extracted {view_type} score: {score} using selector {selector}")
+                
+                if not score_text or score_text == '':
+                    if DEBUG_MODE:
+                        logger.debug(f"Selector {selector} found element but content is empty (attempt {attempt + 1}/{max_retries})")
+                    continue
+                
+                score_text = score_text.replace('%', '').strip()
+                
+                try:
+                    score = int(score_text)
+                except ValueError:
+                    if DEBUG_MODE:
+                        logger.debug(f"Could not parse score text '{score_text}' as integer for selector {selector}")
+                    continue
+                
+                if score < 0 or score > 100:
+                    logger.warning(f"Invalid score {score} extracted for {view_type} (must be 0-100), selector: {selector}")
+                    continue
+                
+                if DEBUG_MODE:
+                    logger.debug(f"Successfully extracted {view_type} score: {score} using selector {selector} (attempt {attempt + 1}/{max_retries})")
                 return score
-        except Exception as e:
-            logger.debug(f"Failed to extract score with selector {selector}: {e}")
-            continue
+                
+            except Exception as e:
+                if DEBUG_MODE:
+                    logger.debug(f"Failed to extract score with selector {selector} (attempt {attempt + 1}/{max_retries}): {e}")
+                continue
+        
+        if attempt < max_retries - 1:
+            if DEBUG_MODE:
+                logger.debug(f"No valid score found in attempt {attempt + 1}/{max_retries}, retrying after {retry_delay}s delay...")
+            time.sleep(retry_delay)
+    
+    logger.warning(f"Failed to extract {view_type} score after {max_retries} attempts with all selectors")
+    
+    if DEBUG_MODE or get_debug_mode():
+        screenshot_path = _save_debug_screenshot(page, url, f"score_extraction_failed_{view_type}")
+        html_path = _save_debug_html(page, url, f"score_extraction_failed_{view_type}")
+        if screenshot_path:
+            logger.info(f"Debug screenshot saved: {screenshot_path}")
+        if html_path:
+            logger.info(f"Debug HTML saved: {html_path}")
     
     return None
 
@@ -633,10 +1174,10 @@ def _get_psi_report_url(page: Page) -> Optional[str]:
     return None
 
 
-def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]:
+def _run_analysis_once(url: str, timeout: int, force_retry: bool = False) -> Dict[str, Optional[int | str]]:
     """
     Internal function to run a single Playwright analysis attempt with circuit breaker protection,
-    result caching, memory monitoring, and resource blocking optimizations.
+    result caching, memory monitoring, resource blocking optimizations, and comprehensive error handling.
     """
     circuit_breaker = _get_circuit_breaker()
     logger = get_logger()
@@ -650,6 +1191,7 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
         warm_start = instance is not None and instance.warm_start
         
         analysis_start_time = time.time()
+        last_successful_step = None
         
         if warm_start:
             logger.debug(f"Using warm Playwright instance for {url}")
@@ -660,6 +1202,8 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
         
         page = None
         page_load_start = None
+        reload_tracker = PageReloadTracker()
+        
         try:
             context = instance.context
             page = context.new_page()
@@ -670,32 +1214,96 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
             
             instance.warm_start = True
             
-            logger.debug(f"Navigating to PageSpeed Insights...")
+            if DEBUG_MODE:
+                logger.debug(f"Navigating to PageSpeed Insights...")
+            
             nav_start = time.time()
             page.goto('https://pagespeed.web.dev/', wait_until='domcontentloaded', timeout=30000)
             nav_time = time.time() - nav_start
+            last_successful_step = "Navigated to PageSpeed Insights"
             
-            logger.debug(f"Entering URL: {url}")
-            url_input = page.locator('input[type="url"], input[name="url"], input[placeholder*="URL"]').first
-            url_input.fill(url)
+            if DEBUG_MODE:
+                logger.debug(f"Page navigation took {nav_time:.2f}s")
+                logger.debug(f"Entering URL: {url}")
+            
+            try:
+                url_input = page.locator('input[type="url"], input[name="url"], input[placeholder*="URL"]').first
+                url_input.fill(url)
+                last_successful_step = "Entered URL in input field"
+            except Exception as e:
+                screenshot_path = None
+                html_path = None
+                if DEBUG_MODE or get_debug_mode():
+                    screenshot_path = _save_debug_screenshot(page, url, "input_not_found")
+                    html_path = _save_debug_html(page, url, "input_not_found")
+                
+                pool.return_instance(instance, success=False)
+                error_msg = _create_enhanced_error_message(
+                    f"Failed to find URL input field: {e}",
+                    url,
+                    page=page,
+                    last_successful_step=last_successful_step,
+                    screenshot_path=screenshot_path,
+                    html_path=html_path
+                )
+                raise PlaywrightSelectorTimeoutError(error_msg)
+            
             time.sleep(0.5)
             
-            logger.debug("Clicking analyze button...")
-            analyze_button = page.locator('button:has-text("Analyze"), button[type="submit"]').first
-            page_load_start = time.time()
-            analyze_button.click()
+            if DEBUG_MODE:
+                logger.debug("Clicking analyze button...")
             
-            logger.debug("Waiting for analysis to complete...")
-            analysis_completed = _wait_for_analysis_completion(page, timeout_seconds=min(180, timeout))
+            page_load_start = time.time()
+            button_clicked = _click_analyze_button(page, url, reload_tracker, timeout_ms=10000)
+            if not button_clicked:
+                pool.return_instance(instance, success=False)
+                raise PlaywrightSelectorTimeoutError("Failed to click analyze button - all selectors failed")
+            
+            last_successful_step = "Clicked analyze button"
+            
+            if DEBUG_MODE:
+                logger.debug("Waiting for analysis to complete...")
+            
+            analysis_completed = _wait_for_analysis_completion(page, url, reload_tracker, timeout_seconds=min(180, timeout))
             
             if not analysis_completed:
                 elapsed = time.time() - analysis_start_time
-                if elapsed >= timeout:
+                if elapsed >= timeout * 0.9:
+                    screenshot_path = None
+                    html_path = None
+                    if DEBUG_MODE or get_debug_mode():
+                        screenshot_path = _save_debug_screenshot(page, url, "analysis_timeout")
+                        html_path = _save_debug_html(page, url, "analysis_timeout")
+                    
                     pool.return_instance(instance, success=False)
-                    raise PlaywrightTimeoutError(f"Analysis exceeded {timeout} seconds timeout")
+                    error_msg = _create_enhanced_error_message(
+                        f"Analysis exceeded {timeout} seconds timeout",
+                        url,
+                        page=page,
+                        last_successful_step=last_successful_step,
+                        screenshot_path=screenshot_path,
+                        html_path=html_path
+                    )
+                    raise PlaywrightAnalysisTimeoutError(error_msg)
+                
+                screenshot_path = None
+                html_path = None
+                if DEBUG_MODE or get_debug_mode():
+                    screenshot_path = _save_debug_screenshot(page, url, "completion_timeout")
+                    html_path = _save_debug_html(page, url, "completion_timeout")
+                
                 pool.return_instance(instance, success=False)
-                raise PlaywrightRunnerError("Analysis did not complete - score elements not found")
+                error_msg = _create_enhanced_error_message(
+                    "Analysis did not complete - score elements not found",
+                    url,
+                    page=page,
+                    last_successful_step=last_successful_step,
+                    screenshot_path=screenshot_path,
+                    html_path=html_path
+                )
+                raise PlaywrightSelectorTimeoutError(error_msg)
             
+            last_successful_step = "Analysis completed successfully"
             page_load_time = time.time() - page_load_start if page_load_start else 0.0
             
             if _monitor_process_memory(instance, max_memory_mb=PlaywrightPool.MAX_MEMORY_MB):
@@ -703,27 +1311,98 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
                 pool.return_instance(instance, success=False)
                 raise PlaywrightRunnerError("Playwright process exceeded memory limit")
             
-            logger.debug("Extracting mobile score...")
-            mobile_score = _extract_score_from_element(page, 'mobile')
+            if DEBUG_MODE:
+                logger.debug("Waiting for device buttons to be available...")
+            
+            buttons_found = _wait_for_device_buttons(page, url, reload_tracker, timeout_seconds=30)
+            
+            if not buttons_found:
+                logger.warning("Device buttons not found within 30s, attempting score extraction anyway...")
+            else:
+                last_successful_step = "Device buttons loaded"
+            
+            time.sleep(2)
+            
+            if DEBUG_MODE:
+                logger.debug("Extracting mobile score...")
+            
+            mobile_score = _extract_score_from_element(page, 'mobile', url)
+            if mobile_score is not None:
+                last_successful_step = f"Extracted mobile score: {mobile_score}"
+            
             mobile_psi_url = _get_psi_report_url(page) if mobile_score and mobile_score < 80 else None
             
-            logger.debug("Switching to desktop view...")
-            try:
-                desktop_button = page.locator('button:has-text("Desktop"), [role="tab"]:has-text("Desktop")').first
-                desktop_button.click(timeout=5000)
+            if DEBUG_MODE:
+                logger.debug("Switching to desktop view...")
+            
+            desktop_button_selectors = [
+                'button:has-text("Desktop")',
+                '[role="tab"]:has-text("Desktop")'
+            ]
+            
+            desktop_score = None
+            desktop_psi_url = None
+            desktop_switched = False
+            
+            for selector in desktop_button_selectors:
+                try:
+                    desktop_button = page.locator(selector).first
+                    desktop_button.click(timeout=5000)
+                    desktop_switched = True
+                    if DEBUG_MODE:
+                        logger.debug(f"Successfully switched to desktop view using selector: {selector}")
+                    last_successful_step = "Switched to desktop view"
+                    break
+                except Exception as e:
+                    if DEBUG_MODE:
+                        logger.debug(f"Failed to switch to desktop with selector {selector}: {e}")
+                    continue
+            
+            if desktop_switched:
                 time.sleep(2)
+                if DEBUG_MODE:
+                    logger.debug("Extracting desktop score...")
                 
-                logger.debug("Extracting desktop score...")
-                desktop_score = _extract_score_from_element(page, 'desktop')
+                desktop_score = _extract_score_from_element(page, 'desktop', url)
+                if desktop_score is not None:
+                    last_successful_step = f"Extracted desktop score: {desktop_score}"
+                
                 desktop_psi_url = _get_psi_report_url(page) if desktop_score and desktop_score < 80 else None
-            except Exception as e:
-                logger.warning(f"Failed to switch to desktop view: {e}")
-                desktop_score = None
-                desktop_psi_url = None
+            else:
+                screenshot_path = None
+                html_path = None
+                if DEBUG_MODE or get_debug_mode():
+                    screenshot_path = _save_debug_screenshot(page, url, "desktop_switch_failed")
+                    html_path = _save_debug_html(page, url, "desktop_switch_failed")
+                
+                pool.return_instance(instance, success=False)
+                error_msg = _create_enhanced_error_message(
+                    "Failed to switch to desktop view with all selectors",
+                    url,
+                    page=page,
+                    last_successful_step=last_successful_step,
+                    screenshot_path=screenshot_path,
+                    html_path=html_path
+                )
+                raise PlaywrightSelectorTimeoutError(error_msg)
             
             if mobile_score is None and desktop_score is None:
+                screenshot_path = None
+                html_path = None
+                if DEBUG_MODE or get_debug_mode():
+                    screenshot_path = _save_debug_screenshot(page, url, "no_scores_extracted")
+                    html_path = _save_debug_html(page, url, "no_scores_extracted")
+                
                 pool.return_instance(instance, success=False)
-                raise PlaywrightRunnerError("Failed to extract any scores from PageSpeed Insights")
+                error_msg = _create_enhanced_error_message(
+                    "Failed to extract any scores from PageSpeed Insights",
+                    url,
+                    page=page,
+                    last_successful_step=last_successful_step,
+                    screenshot_path=screenshot_path,
+                    html_path=html_path
+                )
+                raise PlaywrightSelectorTimeoutError(error_msg)
             
             instance.record_analysis(page_load_time)
             
@@ -753,7 +1432,7 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
                 '_total_requests': instance.blocking_stats.total_requests
             }
             
-        except PlaywrightTimeoutError:
+        except (PlaywrightAnalysisTimeoutError, PlaywrightSelectorTimeoutError):
             if page:
                 try:
                     page.close()
@@ -763,32 +1442,58 @@ def _run_analysis_once(url: str, timeout: int) -> Dict[str, Optional[int | str]]
             raise
             
         except Exception as e:
+            screenshot_path = None
+            html_path = None
             if page:
+                if DEBUG_MODE or get_debug_mode():
+                    screenshot_path = _save_debug_screenshot(page, url, "unexpected_error")
+                    html_path = _save_debug_html(page, url, "unexpected_error")
+                
                 try:
                     page.close()
                 except Exception:
                     pass
+            
             pool.return_instance(instance, success=False)
             
-            if isinstance(e, PlaywrightRunnerError):
+            if isinstance(e, (PlaywrightRunnerError, PermanentError)):
                 raise
             
-            raise PlaywrightRunnerError(f"Playwright execution failed: {e}") from e
-    
-    try:
-        return circuit_breaker.call(_execute_playwright)
-    except Exception as e:
-        if "Circuit breaker" in str(e) and "is OPEN" in str(e):
-            logger.error(
-                f"Circuit breaker is open - PageSpeed Insights unavailable",
-                extra={
-                    'circuit_state': str(circuit_breaker.state.value),
-                    'failure_count': circuit_breaker.failure_count,
-                    'url': url
-                }
+            error_msg = _create_enhanced_error_message(
+                f"Playwright execution failed: {e}",
+                url,
+                page=page,
+                last_successful_step=last_successful_step,
+                screenshot_path=screenshot_path,
+                html_path=html_path
             )
-            raise PlaywrightRunnerError(str(e)) from e
-        raise
+            raise PlaywrightRunnerError(error_msg) from e
+    
+    if force_retry:
+        if DEBUG_MODE:
+            logger.debug(f"Force retry enabled - bypassing circuit breaker for {url}")
+        try:
+            return _execute_playwright()
+        except Exception as e:
+            if "Circuit breaker" in str(e) and "is OPEN" in str(e):
+                logger.warning(f"Circuit breaker bypassed due to --force-retry flag")
+                return _execute_playwright()
+            raise
+    else:
+        try:
+            return circuit_breaker.call(_execute_playwright)
+        except Exception as e:
+            if "Circuit breaker" in str(e) and "is OPEN" in str(e):
+                logger.error(
+                    f"Circuit breaker is open - PageSpeed Insights unavailable",
+                    extra={
+                        'circuit_state': str(circuit_breaker.state.value),
+                        'failure_count': circuit_breaker.failure_count,
+                        'url': url
+                    }
+                )
+                raise PlaywrightRunnerError(str(e)) from e
+            raise
 
 
 def shutdown_pool():

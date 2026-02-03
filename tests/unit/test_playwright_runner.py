@@ -9,7 +9,8 @@ from tools.qa.playwright_runner import (
     run_analysis,
     shutdown_pool,
     PlaywrightRunnerError,
-    PlaywrightTimeoutError,
+    PlaywrightAnalysisTimeoutError,
+    PlaywrightSelectorTimeoutError,
     PlaywrightPool,
     PlaywrightInstance,
     InstanceState,
@@ -192,7 +193,7 @@ class TestScoreExtraction:
         
         page.locator = Mock(return_value=Mock(all=Mock(return_value=[score_elem])))
         
-        score = _extract_score_from_element(page, 'mobile')
+        score = _extract_score_from_element(page, 'mobile', 'https://example.com')
         
         assert score == 85
         page.locator.assert_called()
@@ -212,7 +213,7 @@ class TestScoreExtraction:
         
         page.locator = mock_locator
         
-        score = _extract_score_from_element(page, 'desktop')
+        score = _extract_score_from_element(page, 'desktop', 'https://example.com')
         
         assert score == 92
     
@@ -220,7 +221,7 @@ class TestScoreExtraction:
         page = Mock()
         page.locator = Mock(return_value=Mock(all=Mock(return_value=[])))
         
-        score = _extract_score_from_element(page, 'mobile')
+        score = _extract_score_from_element(page, 'mobile', 'https://example.com')
         
         assert score is None
     
@@ -232,7 +233,7 @@ class TestScoreExtraction:
         
         page.locator = Mock(return_value=Mock(all=Mock(return_value=[score_elem])))
         
-        score = _extract_score_from_element(page, 'mobile')
+        score = _extract_score_from_element(page, 'mobile', 'https://example.com')
         
         assert score is None
 
@@ -264,9 +265,9 @@ class TestTimeoutHandling:
         mock_metrics_collector
     ):
         with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.side_effect = PlaywrightTimeoutError("Analysis timeout")
+            mock_run.side_effect = PlaywrightAnalysisTimeoutError("Analysis timeout")
             
-            with pytest.raises(PlaywrightTimeoutError, match="Analysis timeout"):
+            with pytest.raises(PlaywrightAnalysisTimeoutError, match="Analysis timeout"):
                 run_analysis('https://example.com', timeout=300)
     
     def test_progressive_timeout_increases_after_failure(self):
@@ -279,21 +280,25 @@ class TestTimeoutHandling:
         assert pt.get_timeout() == 600
     
     def test_wait_for_analysis_completion_success(self):
+        from tools.qa.playwright_runner import PageReloadTracker
         page = Mock()
         
         score_elem = Mock()
         page.locator = Mock(return_value=Mock(all=Mock(return_value=[score_elem])))
+        reload_tracker = PageReloadTracker()
         
-        result = _wait_for_analysis_completion(page, timeout_seconds=5)
+        result = _wait_for_analysis_completion(page, 'https://example.com', reload_tracker, timeout_seconds=5)
         
         assert result is True
     
     def test_wait_for_analysis_completion_timeout(self):
+        from tools.qa.playwright_runner import PageReloadTracker
         page = Mock()
         page.locator = Mock(return_value=Mock(all=Mock(return_value=[])))
+        reload_tracker = PageReloadTracker()
         
         with patch('time.sleep'):
-            result = _wait_for_analysis_completion(page, timeout_seconds=1)
+            result = _wait_for_analysis_completion(page, 'https://example.com', reload_tracker, timeout_seconds=1)
         
         assert result is False
 
@@ -318,12 +323,12 @@ class TestRetryLogic:
             ]
             
             with patch('time.sleep'):
-                result = run_analysis('https://example.com', max_retries=3)
+                result = run_analysis('https://example.com')
             
             assert result['mobile_score'] == 85
             assert mock_run.call_count == 2
     
-    def test_exhausted_retries_raises_error(
+    def test_timeout_stops_infinite_retry(
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
         mock_metrics_collector
     ):
@@ -331,10 +336,12 @@ class TestRetryLogic:
             mock_run.side_effect = PlaywrightRunnerError("Persistent error")
             
             with patch('time.sleep'):
-                with pytest.raises(PlaywrightRunnerError, match="Persistent error"):
-                    run_analysis('https://example.com', max_retries=2)
+                with patch('time.time') as mock_time:
+                    mock_time.side_effect = [0, 0, 601, 601]
+                    with pytest.raises(PlaywrightAnalysisTimeoutError, match="exceeded overall timeout"):
+                        run_analysis('https://example.com', timeout=600)
             
-            assert mock_run.call_count == 3
+            assert mock_run.call_count >= 1
     
     def test_permanent_error_no_retry(
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
@@ -344,7 +351,7 @@ class TestRetryLogic:
             mock_run.side_effect = PermanentError("Cannot install Playwright")
             
             with pytest.raises(PermanentError, match="Cannot install Playwright"):
-                run_analysis('https://example.com', max_retries=3)
+                run_analysis('https://example.com')
             
             assert mock_run.call_count == 1
 
@@ -573,16 +580,18 @@ class TestCircuitBreaker:
             mock_run.side_effect = PlaywrightRunnerError("Service unavailable")
             
             with patch('time.sleep'):
-                failures = 0
-                for i in range(10):
-                    try:
-                        run_analysis('https://example.com', max_retries=0)
-                    except (PlaywrightRunnerError, Exception) as e:
-                        failures += 1
-                        if "Circuit breaker" in str(e) and "is OPEN" in str(e):
-                            break
-                
-                assert failures >= 5
+                with patch('time.time') as mock_time:
+                    failures = 0
+                    for i in range(10):
+                        mock_time.side_effect = [0, 0.1]
+                        try:
+                            run_analysis('https://example.com', timeout=1)
+                        except (PlaywrightRunnerError, Exception) as e:
+                            failures += 1
+                            if "Circuit breaker" in str(e) and "is OPEN" in str(e):
+                                break
+                    
+                    assert failures >= 5
 
 
 class TestPlaywrightNotInstalled:
@@ -621,14 +630,12 @@ class TestMetricsCollection:
         mock_metrics_collector
     ):
         with patch('tools.qa.playwright_runner._run_analysis_once') as mock_run:
-            mock_run.side_effect = PlaywrightRunnerError("Analysis failed")
+            mock_run.side_effect = PermanentError("Analysis failed")
             
-            with patch('time.sleep'):
-                try:
-                    run_analysis('https://example.com', max_retries=0)
-                except PlaywrightRunnerError:
-                    pass
+            try:
+                run_analysis('https://example.com')
+            except PermanentError:
+                pass
         
         mock_metrics.increment_total_operations.assert_called_once()
         mock_metrics.record_failure.assert_called()
-        mock_metrics.record_error.assert_called()

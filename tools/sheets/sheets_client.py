@@ -380,8 +380,15 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
 def _check_skip_conditions(row_data: List, row_idx: int, row_values: List) -> bool:
     """
     Check if a row should be skipped based on:
-    1. Cells F or G containing the word "passed"
-    2. Cells F or G having background color #b7e1cd
+    1. BOTH cells F AND G containing the word "passed" or having background color #b7e1cd
+    2. Partial fills (only F or only G) do NOT cause skip - allow processing of empty column
+    
+    Skip logic:
+    - Skip if F has "passed" text AND G has "passed" text
+    - Skip if F has #b7e1cd color AND G has #b7e1cd color
+    - Skip if F has "passed" or #b7e1cd AND G has "passed" or #b7e1cd (any combination)
+    - Do NOT skip if only F is filled (process G)
+    - Do NOT skip if only G is filled (process F)
     
     Args:
         row_data: Formatted row data from the spreadsheet
@@ -389,30 +396,85 @@ def _check_skip_conditions(row_data: List, row_idx: int, row_values: List) -> bo
         row_values: Raw values from the row
         
     Returns:
-        True if the row should be skipped, False otherwise
+        True if the row should be skipped (both F and G are complete), False otherwise
     """
+    logger = get_logger()
+    
     mobile_value = row_values[5] if len(row_values) > 5 else None
     desktop_value = row_values[6] if len(row_values) > 6 else None
     
-    if mobile_value and 'passed' in str(mobile_value).lower():
-        return True
-    if desktop_value and 'passed' in str(desktop_value).lower():
-        return True
+    mobile_has_passed_text = mobile_value and 'passed' in str(mobile_value).lower()
+    desktop_has_passed_text = desktop_value and 'passed' in str(desktop_value).lower()
+    
+    mobile_has_green_bg = False
+    desktop_has_green_bg = False
     
     if row_idx < len(row_data):
         row_cells = row_data[row_idx].get('values', [])
         
         if len(row_cells) > 5:
             mobile_cell = row_cells[5]
-            if _has_target_background_color(mobile_cell):
-                return True
+            mobile_has_green_bg = _has_target_background_color(mobile_cell)
         
         if len(row_cells) > 6:
             desktop_cell = row_cells[6]
-            if _has_target_background_color(desktop_cell):
-                return True
+            desktop_has_green_bg = _has_target_background_color(desktop_cell)
     
-    return False
+    mobile_complete = mobile_has_passed_text or mobile_has_green_bg
+    desktop_complete = desktop_has_passed_text or desktop_has_green_bg
+    
+    should_skip = mobile_complete and desktop_complete
+    
+    actual_row_number = row_idx + 2
+    
+    if should_skip:
+        skip_reasons = []
+        if mobile_has_passed_text:
+            skip_reasons.append(f"F{actual_row_number} contains 'passed' text")
+        if mobile_has_green_bg:
+            skip_reasons.append(f"F{actual_row_number} has #b7e1cd background")
+        if desktop_has_passed_text:
+            skip_reasons.append(f"G{actual_row_number} contains 'passed' text")
+        if desktop_has_green_bg:
+            skip_reasons.append(f"G{actual_row_number} has #b7e1cd background")
+        
+        logger.debug(
+            f"Skipping row {actual_row_number}: Both columns complete - {', '.join(skip_reasons)}",
+            extra={
+                'row': actual_row_number,
+                'mobile_complete': mobile_complete,
+                'desktop_complete': desktop_complete,
+                'mobile_passed_text': mobile_has_passed_text,
+                'mobile_green_bg': mobile_has_green_bg,
+                'desktop_passed_text': desktop_has_passed_text,
+                'desktop_green_bg': desktop_has_green_bg
+            }
+        )
+    else:
+        status_parts = []
+        if mobile_complete:
+            status_parts.append("F complete")
+        else:
+            status_parts.append("F incomplete")
+        if desktop_complete:
+            status_parts.append("G complete")
+        else:
+            status_parts.append("G incomplete")
+        
+        logger.debug(
+            f"Processing row {actual_row_number}: {', '.join(status_parts)} - partial fill allows processing",
+            extra={
+                'row': actual_row_number,
+                'mobile_complete': mobile_complete,
+                'desktop_complete': desktop_complete,
+                'mobile_passed_text': mobile_has_passed_text,
+                'mobile_green_bg': mobile_has_green_bg,
+                'desktop_passed_text': desktop_has_passed_text,
+                'desktop_green_bg': desktop_has_green_bg
+            }
+        )
+    
+    return should_skip
 
 
 def _has_target_background_color(cell: dict) -> bool:

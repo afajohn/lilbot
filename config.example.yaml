@@ -58,3 +58,6 @@ redirect-timeout: 10.0
 
 # Optional: Disable progress bar (useful for logging)
 # no-progress-bar: true
+
+# Optional: Force retry mode (bypass circuit breaker during critical runs)
+# force-retry: true

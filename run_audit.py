@@ -64,7 +64,8 @@ def process_url(
     url_validator: Optional[URLValidator] = None,
     validate_dns: bool = True,
     validate_redirects: bool = True,
-    progress_bar: Optional[tqdm] = None
+    progress_bar: Optional[tqdm] = None,
+    force_retry: bool = False
 ) -> Dict[str, Any]:
     log = logger.get_logger()
     metrics = get_global_metrics()
@@ -222,7 +223,7 @@ def process_url(
         }
     
     try:
-        result = playwright_runner.run_analysis(sanitized_url, timeout=timeout, skip_cache=skip_cache)
+        result = playwright_runner.run_analysis(sanitized_url, timeout=timeout, skip_cache=skip_cache, force_retry=force_retry)
         
         mobile_score = result.get('mobile_score')
         desktop_score = result.get('desktop_score')
@@ -242,14 +243,16 @@ def process_url(
         if not existing_mobile_psi and mobile_score is not None:
             if mobile_score >= SCORE_THRESHOLD:
                 updates.append((row_index, MOBILE_COLUMN, 'passed'))
-            elif mobile_psi_url:
-                updates.append((row_index, MOBILE_COLUMN, mobile_psi_url))
+            else:
+                if mobile_psi_url:
+                    updates.append((row_index, MOBILE_COLUMN, mobile_psi_url))
         
         if not existing_desktop_psi and desktop_score is not None:
             if desktop_score >= SCORE_THRESHOLD:
                 updates.append((row_index, DESKTOP_COLUMN, 'passed'))
-            elif desktop_psi_url:
-                updates.append((row_index, DESKTOP_COLUMN, desktop_psi_url))
+            else:
+                if desktop_psi_url:
+                    updates.append((row_index, DESKTOP_COLUMN, desktop_psi_url))
         
         if updates:
             try:
@@ -315,7 +318,7 @@ def process_url(
             'desktop_psi_url': desktop_psi_url
         }
         
-    except playwright_runner.PlaywrightTimeoutError as e:
+    except playwright_runner.PlaywrightAnalysisTimeoutError as e:
         error_msg = f"Timeout - {e}"
         if progress_bar:
             progress_bar.set_description(f"Timeout (row {row_index})")
@@ -331,7 +334,7 @@ def process_url(
                 log.error(f"Failed to analyze {url} due to timeout", exc_info=True)
                 log.info("")
         metrics.record_error(
-            error_type='PlaywrightTimeoutError',
+            error_type='PlaywrightAnalysisTimeoutError',
             function_name='process_url',
             error_message=str(e),
             is_retryable=False,
@@ -584,6 +587,16 @@ def main():
         action='store_true',
         help='Disable progress bar (useful for logging)'
     )
+    parser.add_argument(
+        '--force-retry',
+        action='store_true',
+        help='Bypass circuit breaker and force retries during critical runs'
+    )
+    parser.add_argument(
+        '--debug-mode',
+        action='store_true',
+        help='Enable debug mode with verbose Playwright logging, screenshots, and HTML capture on errors'
+    )
     
     args = parser.parse_args()
     
@@ -633,6 +646,10 @@ def main():
     
     log = logger.setup_logger()
     metrics = get_global_metrics()
+    
+    if args.debug_mode:
+        playwright_runner.set_debug_mode(True)
+        log.info("Debug mode enabled: verbose logging, screenshots, and HTML capture on errors")
     
     if not os.path.exists(args.service_account):
         log.error(f"Service account file not found: {args.service_account}")
@@ -821,6 +838,10 @@ def main():
         log.info("Cache is disabled (--skip-cache flag)")
     if args.dry_run:
         log.info("DRY RUN MODE: No changes will be made to the spreadsheet")
+    if args.force_retry:
+        log.info("FORCE RETRY MODE: Circuit breaker will be bypassed")
+    if args.debug_mode:
+        log.info("DEBUG MODE: Screenshots and HTML capture enabled on errors")
     if args.whitelist:
         log.info(f"URL whitelist: {args.whitelist}")
     if args.blacklist:
@@ -860,7 +881,8 @@ def main():
                 url_validator,
                 validate_dns,
                 validate_redirects,
-                progress_bar
+                progress_bar,
+                args.force_retry
             ): url_data for url_data in urls
         }
         

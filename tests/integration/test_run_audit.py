@@ -78,6 +78,171 @@ class TestProcessUrl:
     
     @patch('qa.playwright_runner.run_analysis')
     @patch('sheets.sheets_client.batch_write_psi_urls')
+    def test_process_url_score_boundary_79(self, mock_batch_write, mock_run_analysis, mock_google_service):
+        """Test score at 79 (below threshold) - should write PSI URLs"""
+        mock_run_analysis.return_value = {
+            'mobile_score': 79,
+            'desktop_score': 79,
+            'mobile_psi_url': 'https://psi.mobile/79',
+            'desktop_psi_url': 'https://psi.desktop/79'
+        }
+        
+        url_data = (2, 'https://example.com', None, None, False)
+        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        
+        result = run_audit.process_url(
+            url_data,
+            'test-spreadsheet-id',
+            'Sheet1',
+            mock_google_service,
+            600,
+            1,
+            processed_count
+        )
+        
+        assert result['mobile_score'] == 79
+        assert result['desktop_score'] == 79
+        
+        mock_batch_write.assert_called_once()
+        updates = mock_batch_write.call_args[0][2]
+        assert len(updates) == 2
+        assert (2, 'F', 'https://psi.mobile/79') in updates
+        assert (2, 'G', 'https://psi.desktop/79') in updates
+    
+    @patch('qa.playwright_runner.run_analysis')
+    @patch('sheets.sheets_client.batch_write_psi_urls')
+    def test_process_url_score_boundary_80(self, mock_batch_write, mock_run_analysis, mock_google_service):
+        """Test score at 80 (at threshold) - should write 'passed'"""
+        mock_run_analysis.return_value = {
+            'mobile_score': 80,
+            'desktop_score': 80,
+            'mobile_psi_url': 'https://psi.mobile/80',
+            'desktop_psi_url': 'https://psi.desktop/80'
+        }
+        
+        url_data = (2, 'https://example.com', None, None, False)
+        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        
+        result = run_audit.process_url(
+            url_data,
+            'test-spreadsheet-id',
+            'Sheet1',
+            mock_google_service,
+            600,
+            1,
+            processed_count
+        )
+        
+        assert result['mobile_score'] == 80
+        assert result['desktop_score'] == 80
+        
+        mock_batch_write.assert_called_once()
+        updates = mock_batch_write.call_args[0][2]
+        assert len(updates) == 2
+        assert (2, 'F', 'passed') in updates
+        assert (2, 'G', 'passed') in updates
+    
+    @patch('qa.playwright_runner.run_analysis')
+    @patch('sheets.sheets_client.batch_write_psi_urls')
+    def test_process_url_score_boundary_81(self, mock_batch_write, mock_run_analysis, mock_google_service):
+        """Test score at 81 (above threshold) - should write 'passed'"""
+        mock_run_analysis.return_value = {
+            'mobile_score': 81,
+            'desktop_score': 81,
+            'mobile_psi_url': 'https://psi.mobile/81',
+            'desktop_psi_url': 'https://psi.desktop/81'
+        }
+        
+        url_data = (2, 'https://example.com', None, None, False)
+        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        
+        result = run_audit.process_url(
+            url_data,
+            'test-spreadsheet-id',
+            'Sheet1',
+            mock_google_service,
+            600,
+            1,
+            processed_count
+        )
+        
+        assert result['mobile_score'] == 81
+        assert result['desktop_score'] == 81
+        
+        mock_batch_write.assert_called_once()
+        updates = mock_batch_write.call_args[0][2]
+        assert len(updates) == 2
+        assert (2, 'F', 'passed') in updates
+        assert (2, 'G', 'passed') in updates
+    
+    @patch('qa.playwright_runner.run_analysis')
+    @patch('sheets.sheets_client.batch_write_psi_urls')
+    def test_process_url_mixed_scores_mobile_pass_desktop_fail(self, mock_batch_write, mock_run_analysis, mock_google_service):
+        """Test mixed scores: mobile passes (>=80), desktop fails (<80)"""
+        mock_run_analysis.return_value = {
+            'mobile_score': 85,
+            'desktop_score': 75,
+            'mobile_psi_url': 'https://psi.mobile/85',
+            'desktop_psi_url': 'https://psi.desktop/75'
+        }
+        
+        url_data = (2, 'https://example.com', None, None, False)
+        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        
+        result = run_audit.process_url(
+            url_data,
+            'test-spreadsheet-id',
+            'Sheet1',
+            mock_google_service,
+            600,
+            1,
+            processed_count
+        )
+        
+        assert result['mobile_score'] == 85
+        assert result['desktop_score'] == 75
+        
+        mock_batch_write.assert_called_once()
+        updates = mock_batch_write.call_args[0][2]
+        assert len(updates) == 2
+        assert (2, 'F', 'passed') in updates
+        assert (2, 'G', 'https://psi.desktop/75') in updates
+    
+    @patch('qa.playwright_runner.run_analysis')
+    @patch('sheets.sheets_client.batch_write_psi_urls')
+    def test_process_url_mixed_scores_mobile_fail_desktop_pass(self, mock_batch_write, mock_run_analysis, mock_google_service):
+        """Test mixed scores: mobile fails (<80), desktop passes (>=80)"""
+        mock_run_analysis.return_value = {
+            'mobile_score': 70,
+            'desktop_score': 90,
+            'mobile_psi_url': 'https://psi.mobile/70',
+            'desktop_psi_url': 'https://psi.desktop/90'
+        }
+        
+        url_data = (2, 'https://example.com', None, None, False)
+        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        
+        result = run_audit.process_url(
+            url_data,
+            'test-spreadsheet-id',
+            'Sheet1',
+            mock_google_service,
+            600,
+            1,
+            processed_count
+        )
+        
+        assert result['mobile_score'] == 70
+        assert result['desktop_score'] == 90
+        
+        mock_batch_write.assert_called_once()
+        updates = mock_batch_write.call_args[0][2]
+        assert len(updates) == 2
+        assert (2, 'F', 'https://psi.mobile/70') in updates
+        assert (2, 'G', 'passed') in updates
+    
+    @patch('qa.playwright_runner.run_analysis')
+    @patch('sheets.sheets_client.batch_write_psi_urls')
     def test_process_url_skip_existing_mobile(self, mock_batch_write, mock_run_analysis, mock_google_service):
         mock_run_analysis.return_value = {
             'mobile_score': 85,
@@ -140,8 +305,8 @@ class TestProcessUrl:
     
     @patch('qa.playwright_runner.run_analysis')
     def test_process_url_playwright_timeout(self, mock_run_analysis, mock_google_service):
-        from qa.playwright_runner import PlaywrightTimeoutError
-        mock_run_analysis.side_effect = PlaywrightTimeoutError("Timeout after 600 seconds")
+        from qa.playwright_runner import PlaywrightAnalysisTimeoutError
+        mock_run_analysis.side_effect = PlaywrightAnalysisTimeoutError("Timeout after 600 seconds")
         
         url_data = (2, 'https://example.com', None, None, False)
         processed_count = {'count': 0, 'lock': __import__('threading').Lock()}

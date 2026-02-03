@@ -156,6 +156,7 @@ class TestReadUrls:
         assert len(urls) == 3
         assert urls[0] == (2, 'https://example.com', None, None, False)
         assert urls[1] == (3, 'https://google.com', None, None, False)
+        assert urls[2] == (4, 'https://github.com', 'passed', None, False)
     
     def test_read_urls_with_existing_psi_urls(self, mock_google_service):
         values_data = {
@@ -244,23 +245,61 @@ class TestReadUrls:
 
 
 class TestCheckSkipConditions:
-    def test_skip_with_passed_in_mobile(self):
+    def test_skip_with_passed_in_both_columns(self):
+        row_data = []
+        row_values = ['https://example.com', '', '', '', '', 'passed', 'passed']
+        
+        result = sheets_client._check_skip_conditions(row_data, 0, row_values)
+        
+        assert result is True
+    
+    def test_no_skip_with_passed_in_mobile_only(self):
         row_data = []
         row_values = ['https://example.com', '', '', '', '', 'passed', '']
         
         result = sheets_client._check_skip_conditions(row_data, 0, row_values)
         
-        assert result is True
+        assert result is False
     
-    def test_skip_with_passed_in_desktop(self):
+    def test_no_skip_with_passed_in_desktop_only(self):
         row_data = []
         row_values = ['https://example.com', '', '', '', '', '', 'passed']
         
         result = sheets_client._check_skip_conditions(row_data, 0, row_values)
         
+        assert result is False
+    
+    def test_skip_with_green_background_in_both_columns(self):
+        row_data = [{
+            'values': [
+                {}, {}, {}, {}, {},
+                {
+                    'effectiveFormat': {
+                        'backgroundColor': {
+                            'red': 0xb7 / 255,
+                            'green': 0xe1 / 255,
+                            'blue': 0xcd / 255
+                        }
+                    }
+                },
+                {
+                    'effectiveFormat': {
+                        'backgroundColor': {
+                            'red': 0xb7 / 255,
+                            'green': 0xe1 / 255,
+                            'blue': 0xcd / 255
+                        }
+                    }
+                }
+            ]
+        }]
+        row_values = ['https://example.com', '', '', '', '', '', '']
+        
+        result = sheets_client._check_skip_conditions(row_data, 0, row_values)
+        
         assert result is True
     
-    def test_skip_with_green_background(self):
+    def test_no_skip_with_green_background_in_mobile_only(self):
         row_data = [{
             'values': [
                 {}, {}, {}, {}, {},
@@ -280,15 +319,105 @@ class TestCheckSkipConditions:
         
         result = sheets_client._check_skip_conditions(row_data, 0, row_values)
         
+        assert result is False
+    
+    def test_no_skip_with_green_background_in_desktop_only(self):
+        row_data = [{
+            'values': [
+                {}, {}, {}, {}, {},
+                {},
+                {
+                    'effectiveFormat': {
+                        'backgroundColor': {
+                            'red': 0xb7 / 255,
+                            'green': 0xe1 / 255,
+                            'blue': 0xcd / 255
+                        }
+                    }
+                }
+            ]
+        }]
+        row_values = ['https://example.com', '', '', '', '', '', '']
+        
+        result = sheets_client._check_skip_conditions(row_data, 0, row_values)
+        
+        assert result is False
+    
+    def test_skip_with_passed_text_and_green_background_mix(self):
+        row_data = [{
+            'values': [
+                {}, {}, {}, {}, {},
+                {},
+                {
+                    'effectiveFormat': {
+                        'backgroundColor': {
+                            'red': 0xb7 / 255,
+                            'green': 0xe1 / 255,
+                            'blue': 0xcd / 255
+                        }
+                    }
+                }
+            ]
+        }]
+        row_values = ['https://example.com', '', '', '', '', 'passed', '']
+        
+        result = sheets_client._check_skip_conditions(row_data, 0, row_values)
+        
         assert result is True
     
-    def test_no_skip(self):
+    def test_skip_with_green_background_and_passed_text_mix(self):
+        row_data = [{
+            'values': [
+                {}, {}, {}, {}, {},
+                {
+                    'effectiveFormat': {
+                        'backgroundColor': {
+                            'red': 0xb7 / 255,
+                            'green': 0xe1 / 255,
+                            'blue': 0xcd / 255
+                        }
+                    }
+                },
+                {}
+            ]
+        }]
+        row_values = ['https://example.com', '', '', '', '', '', 'passed']
+        
+        result = sheets_client._check_skip_conditions(row_data, 0, row_values)
+        
+        assert result is True
+    
+    def test_no_skip_with_empty_columns(self):
         row_data = [{'values': [{}] * 7}]
         row_values = ['https://example.com', '', '', '', '', '', '']
         
         result = sheets_client._check_skip_conditions(row_data, 0, row_values)
         
         assert result is False
+    
+    def test_skip_with_case_insensitive_passed(self):
+        row_data = []
+        row_values = ['https://example.com', '', '', '', '', 'PASSED', 'Passed']
+        
+        result = sheets_client._check_skip_conditions(row_data, 0, row_values)
+        
+        assert result is True
+    
+    def test_no_skip_with_psi_url_in_mobile_only(self):
+        row_data = []
+        row_values = ['https://example.com', '', '', '', '', 'https://psi.url/mobile', '']
+        
+        result = sheets_client._check_skip_conditions(row_data, 0, row_values)
+        
+        assert result is False
+    
+    def test_skip_with_psi_url_and_passed_containing_text(self):
+        row_data = []
+        row_values = ['https://example.com', '', '', '', '', 'URL passed validation', 'Test passed']
+        
+        result = sheets_client._check_skip_conditions(row_data, 0, row_values)
+        
+        assert result is True
 
 
 class TestHasTargetBackgroundColor:

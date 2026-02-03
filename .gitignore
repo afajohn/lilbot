@@ -73,3 +73,9 @@ config.yaml
 config.yml
 audit-config.yaml
 audit-config.yml
+
+# Test scenario files
+test_scenarios.json
+
+# Debug artifacts (playwright_runner.py)
+debug_screenshots/

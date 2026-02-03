@@ -128,7 +128,7 @@ python run_audit.py --tab "Barranquilla Singles" --service-account "service-acco
 | `--tab` | Yes | - | Name of the spreadsheet tab to read URLs from |
 | `--spreadsheet-id` | No | `1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I` | Google Spreadsheet ID |
 | `--service-account` | No | `service-account.json` | Path to service account JSON file |
-| `--timeout` | No | `600` | Timeout in seconds for each URL analysis |
+| `--timeout` | No | `600` | Timeout in seconds for each URL analysis (recommend 900-1200 for production) |
 | `--concurrency` | No | `3` | Number of concurrent workers (1-5) |
 | `--skip-cache` | No | `False` | Skip cache and force fresh analysis |
 | `--whitelist` | No | - | URL whitelist patterns (space-separated) |
@@ -159,7 +159,11 @@ python run_audit.py --tab "Website 1" --service-account "C:\path\to\credentials.
 
 **Increase timeout for slow-loading sites:**
 ```bash
+# Recommended for most production use (15 minutes)
 python run_audit.py --tab "Website 1" --timeout 900
+
+# For slow connections or complex sites (20 minutes)
+python run_audit.py --tab "Website 1" --timeout 1200
 ```
 
 **Skip cache for fresh analysis:**
@@ -255,6 +259,8 @@ The tool expects your spreadsheet to have the following structure:
 
 ## How It Works
 
+### Workflow Overview
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    1. AUTHENTICATION                         │
@@ -272,14 +278,15 @@ The tool expects your spreadsheet to have the following structure:
 │                    3. ANALYZE EACH URL                       │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │ a) Check cache for existing results                  │  │
-│  │ b) If cache miss: Launch Playwright browser          │  │
-│  │ c) Navigate to pagespeed.web.dev                     │  │
+│  │ b) If cache miss: Launch Chromium browser            │  │
+│  │ c) Navigate to https://pagespeed.web.dev             │  │
 │  │ d) Enter URL and start analysis                      │  │
-│  │ e) Extract Mobile score from .lh-exp-gauge__percentage│ │
-│  │ f) Switch to Desktop view                            │  │
-│  │ g) Extract Desktop score                             │  │
-│  │ h) Capture PSI URLs for scores < 80                  │  │
-│  │ i) Cache results for 24 hours                        │  │
+│  │ e) Wait up to 30 seconds for analysis to complete    │  │
+│  │ f) Wait for Mobile/Desktop toggle buttons to appear  │  │
+│  │ g) Click "Mobile" button and extract score           │  │
+│  │ h) Click "Desktop" button and extract score          │  │
+│  │ i) Capture PSI URLs for scores < 80                  │  │
+│  │ j) Cache results for 24 hours                        │  │
 │  └──────────────────────────────────────────────────────┘  │
 └────────────────────┬────────────────────────────────────────┘
                      │
@@ -287,8 +294,8 @@ The tool expects your spreadsheet to have the following structure:
 ┌─────────────────────────────────────────────────────────────┐
 │                    4. UPDATE SPREADSHEET                     │
 │  Immediately write results after each URL:                  │
-│  • Column F: Mobile PSI URL (if score < 80, else "passed") │
-│  • Column G: Desktop PSI URL (if score < 80, else "passed")│
+│  • Column F: "passed" (if score ≥ 80) OR PSI URL (< 80)    │
+│  • Column G: "passed" (if score ≥ 80) OR PSI URL (< 80)    │
 └────────────────────┬────────────────────────────────────────┘
                      │
                      ▼
@@ -297,6 +304,47 @@ The tool expects your spreadsheet to have the following structure:
 │  Display audit summary with pass/fail statistics            │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### Detailed PageSpeed Insights Automation
+
+The tool automates PageSpeed Insights analysis using Playwright with the following sequence:
+
+1. **Launch Browser**: Chromium browser launched in headless mode
+2. **Navigate**: Opens https://pagespeed.web.dev
+3. **Enter URL**: Inputs the target URL into the analysis field
+4. **Start Analysis**: Clicks the "Analyze" button
+5. **Wait for Results**: Waits up to 30 seconds for the analysis to complete
+6. **Extract Mobile Score**:
+   - Waits for Mobile/Desktop toggle buttons to appear
+   - Clicks the "Mobile" button (if not already selected)
+   - Extracts score from `.lh-exp-gauge__percentage` selector
+   - Captures the PageSpeed Insights URL for the mobile report
+7. **Extract Desktop Score**:
+   - Clicks the "Desktop" button to switch views
+   - Extracts score from `.lh-exp-gauge__percentage` selector
+   - Captures the PageSpeed Insights URL for the desktop report
+8. **Return Results**: Returns scores and URLs to the audit processor
+
+### Spreadsheet Output Logic
+
+After analyzing each URL, the tool writes results to columns F and G:
+
+**For scores ≥ 80 (passing):**
+- Column F (Mobile): Cell contains the text `"passed"`
+- Column G (Desktop): Cell contains the text `"passed"`
+
+**For scores < 80 (failing):**
+- Column F (Mobile): Full PageSpeed Insights URL (e.g., `https://pagespeed.web.dev/analysis?url=https://example.com`)
+- Column G (Desktop): Full PageSpeed Insights URL with desktop parameter
+
+**Examples of cell values:**
+
+| Score | Column F (Mobile) | Column G (Desktop) |
+|-------|-------------------|-------------------|
+| Mobile: 92, Desktop: 95 | `passed` | `passed` |
+| Mobile: 65, Desktop: 85 | `https://pagespeed.web.dev/analysis?url=https://example.com` | `passed` |
+| Mobile: 82, Desktop: 72 | `passed` | `https://pagespeed.web.dev/analysis?url=https://example.com` |
+| Mobile: 65, Desktop: 70 | `https://pagespeed.web.dev/analysis?url=https://example.com` | `https://pagespeed.web.dev/analysis?url=https://example.com` |
 
 ## Output
 
@@ -396,8 +444,15 @@ Logs are saved in the `logs/` directory with timestamps for future reference.
 
 **Solution**:
 - Increase timeout: `python run_audit.py --tab "Website 1" --timeout 900`
+- For slow connections or complex websites, use `--timeout 1200` (20 minutes) or higher
 - Check if the URL is accessible and loads properly
 - Verify your internet connection is stable
+
+**Recommended timeout values:**
+- Fast connection, simple sites: 600 seconds (default)
+- Average connection/sites: 900 seconds (15 minutes)
+- Slow connection or complex sites: 1200 seconds (20 minutes)
+- Very slow connections: 1800 seconds (30 minutes)
 
 ### Error: Playwright browser not found
 
@@ -442,6 +497,70 @@ playwright install chromium --force
 - The tool automatically monitors memory and restarts browser contexts
 - This is expected behavior and should resolve automatically
 - If persistent, try reducing `--concurrency` to limit parallel browsers
+
+### PageSpeed Insights Selector Issues
+
+**Common Issues and Solutions:**
+
+#### 1. Error: Failed to find Mobile/Desktop toggle buttons
+
+**Cause**: PageSpeed Insights UI changed, or buttons didn't appear after analysis.
+
+**Solutions**:
+- Wait longer for analysis to complete (buttons appear after results load)
+- Increase timeout: `--timeout 900` or higher
+- Enable debug mode to capture screenshots: `--debug-mode`
+- Check debug screenshots in `debug_screenshots/` directory
+
+#### 2. Error: Score extraction failed
+
+**Cause**: Selector `.lh-exp-gauge__percentage` not found or page structure changed.
+
+**Solutions**:
+- Enable debug mode: `--debug-mode` to capture page HTML
+- Check if PageSpeed Insights UI has been updated
+- Update selectors in `tools/qa/playwright_runner.py` if needed
+- Try manual navigation to confirm PSI is working: https://pagespeed.web.dev
+
+#### 3. Error: Analysis timeout after 30 seconds
+
+**Cause**: URL took too long to analyze or PageSpeed Insights is slow.
+
+**Solutions**:
+- This is the PageSpeed Insights analysis timeout (not the overall timeout)
+- Increase overall timeout: `--timeout 1200` to allow multiple retries
+- Check if the target website is accessible and responding
+- Try analyzing the URL manually at https://pagespeed.web.dev
+
+#### 4. Error: Button click failed or no response
+
+**Cause**: Playwright couldn't interact with Mobile/Desktop toggle.
+
+**Solutions**:
+- Page may still be loading; increase `--timeout`
+- Enable debug mode to see page state: `--debug-mode`
+- Check for JavaScript errors on the PageSpeed Insights page
+- The tool automatically retries with page reload (up to 3 attempts)
+
+#### 5. Debugging Selector Issues
+
+**Enable debug mode for detailed diagnostics:**
+```bash
+python run_audit.py --tab "Website 1" --debug-mode
+```
+
+This captures:
+- Full-page screenshots on errors (saved to `debug_screenshots/`)
+- Complete page HTML for inspection
+- List of all visible buttons and elements
+- Detailed error messages with page state
+
+**Manual testing with Playwright:**
+```bash
+playwright codegen https://pagespeed.web.dev
+```
+
+This opens an interactive browser where you can test selectors and generate code.
 
 ### Permission denied when writing to spreadsheet
 

@@ -65,11 +65,26 @@ python run_audit.py --tab "TAB_NAME" --dns-timeout 10 --redirect-timeout 15
 
 # Optional: Disable progress bar (useful for logging/CI)
 python run_audit.py --tab "TAB_NAME" --no-progress-bar
+
+# Optional: Force retry mode (bypass circuit breaker during critical runs)
+python run_audit.py --tab "TAB_NAME" --force-retry
+
+# Optional: Debug mode (verbose logging, screenshots, and HTML capture on errors)
+python run_audit.py --tab "TAB_NAME" --debug-mode
 ```
 
 **Validate Service Account:**
 ```bash
 python validate_service_account.py service-account.json
+```
+
+**Validate Skip Logic:**
+```bash
+# Test skip logic with all scenarios
+python validate_skip_logic.py
+
+# Generate test spreadsheet scenarios for debugging
+python generate_test_spreadsheet_scenarios.py
 ```
 
 **Query Audit Trail:**
@@ -144,6 +159,43 @@ python -m pytest  # Or use run_tests.ps1 (Windows) or ./run_tests.sh (Unix)
   - `tqdm` - Progress bars for better UX
   - `pyyaml` - YAML configuration file support
   - `playwright` - Browser automation for PageSpeed Insights
+
+## Error Handling and Recovery
+
+The Playwright runner includes comprehensive error handling and recovery mechanisms:
+
+### Page Reload Logic
+- Automatically reloads page when selectors fail repeatedly (up to 3 attempts)
+- Fresh start logic ensures clean state after failures
+- Tracks reload attempts to prevent infinite loops
+
+### Debug Mode (`--debug-mode`)
+When enabled, the system:
+- Captures screenshots on failures (saved to `debug_screenshots/`)
+- Saves page HTML on errors for post-mortem analysis
+- Enables verbose Playwright logging
+- Includes timestamp and sanitized URL in filenames
+- Creates enhanced error messages with diagnostic information
+
+### Enhanced Error Messages
+Error messages include:
+- Current page URL and title
+- Available buttons and elements on the page
+- Last successful step before failure
+- Paths to debug screenshots and HTML files
+- Visibility status of page elements
+
+### Recovery Strategies
+1. **Selector Timeout**: Retries with page reload
+2. **Analysis Timeout**: Aborts immediately (not retryable)
+3. **Button Not Found**: Reloads page and retries with multiple selectors
+4. **Score Extraction Failed**: Captures debug artifacts and provides detailed context
+
+### Debug Artifacts
+All debug files are saved with format: `YYYYMMDD_HHMMSS_sanitized-url_reason.{png|html}`
+- Screenshots: Full-page captures in PNG format
+- HTML: Complete page source at time of error
+- Organized in `debug_screenshots/` directory (gitignored)
 
 ## Performance Optimizations
 
@@ -230,6 +282,7 @@ The system has been comprehensively optimized for faster URL processing:
 │       ├── logger.py         # Logging utilities
 │       └── url_validator.py  # URL validation (regex, DNS, redirects) and normalization
 ├── .cache/                   # File cache storage (gitignored)
+├── debug_screenshots/        # Debug screenshots and HTML files (gitignored)
 ├── metrics.json              # JSON metrics export (gitignored)
 ├── metrics.prom              # Prometheus metrics export (gitignored)
 ├── dashboard.html            # HTML metrics dashboard (gitignored)
@@ -247,16 +300,33 @@ The system has been comprehensively optimized for faster URL processing:
    - For each URL, `playwright_runner.py` checks cache first (unless `--skip-cache`)
    - On cache miss, launches Playwright browser (retries up to 3 times on failure)
    - Results are cached with 24-hour TTL for future runs
-   - Playwright navigates to PageSpeed Insights and extracts scores from `.lh-exp-gauge__percentage`
+   - **Playwright workflow**:
+     1. Opens Chromium browser in headless mode
+     2. Navigates to https://pagespeed.web.dev
+     3. Enters target URL and starts analysis
+     4. Waits up to 30 seconds for analysis to complete
+     5. Waits for Mobile/Desktop toggle buttons to appear
+     6. Clicks "Mobile" button and extracts score from `.lh-exp-gauge__percentage`
+     7. Clicks "Desktop" button and extracts score from `.lh-exp-gauge__percentage`
+     8. Captures PageSpeed Insights URLs for both views
    - Results returned as structured data
    - **Incremental updates**: Spreadsheet is updated immediately after each URL is analyzed (not batched at the end)
 3. **Output**: 
-   - For scores >= 80: Cell is filled with the text "passed"
+   - For scores >= 80: Cell is filled with the text `"passed"`
    - For scores < 80: PSI URLs written to columns F (mobile) and G (desktop)
    - Each URL's results are written to the sheet immediately upon completion
    - **Metrics export**: `metrics.json` and `metrics.prom` files generated
    - **Dashboard**: HTML dashboard can be generated with `generate_report.py`
    - **Alerting**: Warnings logged if failure rate exceeds 20%
+
+**Example Output Values:**
+
+| Scenario | Column F (Mobile) | Column G (Desktop) |
+|----------|-------------------|-------------------|
+| Both pass (≥80) | `passed` | `passed` |
+| Mobile fails, Desktop passes | `https://pagespeed.web.dev/analysis?url=...` | `passed` |
+| Mobile passes, Desktop fails | `passed` | `https://pagespeed.web.dev/analysis?url=...` |
+| Both fail (<80) | `https://pagespeed.web.dev/analysis?url=...` | `https://pagespeed.web.dev/analysis?url=...` |
 
 ### Key Components
 
@@ -279,7 +349,15 @@ The system has been comprehensively optimized for faster URL processing:
 #### playwright_runner.py
 - Manages Playwright browser instances with advanced pooling
 - Runs PageSpeed Insights analysis with proper error handling
-- Handles timeouts and retries (up to 3 retry attempts with fixed 5s wait)
+- **Persistent Retry Logic**: Infinite retry with exponential backoff (5s-60s) for retryable errors until success or explicit timeout
+- **Smart Timeout Handling**: Distinguishes between analysis timeout (abort) vs selector timeout (retry with fresh page load)
+- **Page Reload Recovery**: Automatically reloads page when selectors fail repeatedly (up to 3 attempts)
+- **Circuit Breaker**: Protects against cascading failures, can be bypassed with `force_retry` flag
+- **Enhanced Error Messages**: Includes current page URL, available elements, last successful step, and debug artifacts
+- **Debug Mode Support**: Captures screenshots and HTML on errors when `--debug-mode` is enabled
+- **Debug Screenshots**: Saves full-page screenshots to `debug_screenshots/` with timestamp and URL
+- **Debug HTML**: Saves complete page source for post-mortem analysis
+- **Page Diagnostics**: Extracts buttons, inputs, links, and their visibility status for debugging
 - Returns structured results with performance metrics
 - **Progressive Timeout**: Starts at 300s, increases to 600s after first failure
 - **Instance Pooling**: Maintains pool of up to 3 reusable browser contexts for warm starts
@@ -364,10 +442,14 @@ URLs are read from `A2:A` (not `A:A`) to skip the header row. Row enumeration st
 - Continue processing remaining URLs even if one fails
 
 ### Retry Logic
-Playwright runs can fail transiently. The system has multiple layers of retry:
-- Playwright internal retries: 2 attempts per run
-- Python runner retries: Up to 3 attempts with fixed 5s wait between attempts
-- Total possible attempts: Up to 6 (2 × 3)
+Playwright runs can fail transiently. The system implements persistent retry-until-success:
+- **Infinite retry with exponential backoff**: For retryable errors, the system retries indefinitely until successful or explicit timeout/permanent error
+- **Exponential backoff**: Starts at 5s, doubles on each retry, max 60s between retries
+- **Timeout handling**:
+  - **Analysis timeout** (PlaywrightAnalysisTimeoutError): Overall operation timeout - aborts immediately, not retryable
+  - **Selector timeout** (PlaywrightSelectorTimeoutError): Failed to find page elements - retries with fresh page load
+- **Circuit breaker**: Protects against cascading failures by opening after 5 consecutive failures
+- **Force retry mode**: Use `--force-retry` flag to bypass circuit breaker during critical runs
 
 ## Input Validation and Data Quality
 
@@ -540,6 +622,12 @@ python run_audit.py --version
 - `SCORE_THRESHOLD`: Minimum passing score (default: 80)
 - Default timeout: 600 seconds (can be overridden with --timeout flag)
 
+**Timeout Recommendations:**
+- Fast connection, simple sites: 600 seconds (default)
+- Average connection/sites: 900 seconds (15 minutes) - recommended for most use cases
+- Slow connection or complex sites: 1200 seconds (20 minutes)
+- Very slow connections: 1800 seconds (30 minutes)
+
 ### Validation Configuration
 - `--dns-timeout`: DNS resolution timeout in seconds (default: 5.0)
 - `--redirect-timeout`: Redirect check timeout in seconds (default: 10.0)
@@ -668,7 +756,7 @@ playwright codegen https://pagespeed.web.dev
 
 ### Common Issues
 1. **UnicodeDecodeError**: Fixed by adding `encoding='utf-8', errors='replace'` to subprocess calls
-2. **Timeout errors**: Increase timeout with `--timeout 900` or higher
+2. **Timeout errors**: Increase timeout with `--timeout 900` or higher (see timeout recommendations above)
 3. **Permission denied**: Verify spreadsheet is shared with service account email
 4. **Slow processing**: Check network connectivity and PageSpeed Insights availability
 5. **Cache issues**: See CACHE_GUIDE.md for troubleshooting cache-related problems
@@ -679,6 +767,70 @@ playwright codegen https://pagespeed.web.dev
    - **WSL**: Ensure X11 forwarding is configured if running in headed mode
 8. **Browser crashes**: Monitor memory usage; restart may be needed for long-running audits
 9. **Selector failures**: PageSpeed Insights UI may have changed; update selectors in `playwright_runner.py`
+
+### PageSpeed Insights Selector Troubleshooting
+
+Common selector issues and their solutions:
+
+#### Mobile/Desktop Toggle Button Not Found
+- **Symptom**: Error message "Failed to find Mobile/Desktop toggle buttons"
+- **Cause**: Buttons don't appear until PageSpeed analysis completes
+- **Solution**: 
+  - Increase overall timeout: `--timeout 1200` 
+  - Enable debug mode: `--debug-mode` to capture screenshots
+  - Check `debug_screenshots/` directory for page state at failure
+  - The tool waits up to 30 seconds for buttons to appear; if consistently failing, may need longer analysis time
+
+#### Score Extraction Failed
+- **Symptom**: Error extracting score from `.lh-exp-gauge__percentage`
+- **Cause**: PageSpeed Insights UI changed or element not visible
+- **Solution**:
+  - Enable debug mode to capture page HTML: `--debug-mode`
+  - Inspect saved HTML in `debug_screenshots/` directory
+  - Test manually at https://pagespeed.web.dev
+  - Update selector hierarchy in `playwright_runner.py` if UI changed:
+    - Primary: `.lh-exp-gauge__percentage`
+    - Fallback: `.lh-gauge__percentage`
+    - Custom: Add new selector based on current UI
+
+#### Analysis Timeout (30 seconds)
+- **Symptom**: "Analysis timeout after 30 seconds"
+- **Cause**: Target website takes too long to analyze or PSI is overloaded
+- **Solution**:
+  - This is the PageSpeed Insights internal timeout (not configurable)
+  - Increase overall tool timeout to allow retries: `--timeout 1200`
+  - The tool will retry with exponential backoff
+  - Check if target URL is accessible and responding quickly
+  - Test manually at https://pagespeed.web.dev to confirm PSI can analyze the URL
+
+#### Button Click Failed
+- **Symptom**: Click on Mobile/Desktop button has no effect
+- **Cause**: Page JavaScript not fully loaded or element not interactive
+- **Solution**:
+  - Tool automatically retries with page reload (up to 3 attempts)
+  - Enable debug mode for diagnostics: `--debug-mode`
+  - Check for JavaScript errors in debug screenshots
+  - Ensure stable internet connection
+
+#### Debug Mode Usage
+Enable comprehensive diagnostics:
+```bash
+python run_audit.py --tab "TAB_NAME" --debug-mode
+```
+
+Debug mode captures:
+- Full-page PNG screenshots on errors
+- Complete HTML source code
+- List of all buttons, inputs, and links on the page
+- Visibility status of all elements
+- Files saved to `debug_screenshots/` with format: `YYYYMMDD_HHMMSS_sanitized-url_reason.{png|html}`
+
+#### Manual Selector Testing
+Use Playwright codegen for interactive testing:
+```bash
+playwright codegen https://pagespeed.web.dev
+```
+This opens a browser with an inspector to test and generate selector code.
 
 ## Dependencies
 
