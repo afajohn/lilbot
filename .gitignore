@@ -91,3 +91,9 @@ validation_report.html
 # Security and Audit Trail
 audit_trail.jsonl
 audit_trail*.jsonl
+
+# Generated API documentation
+api_docs/
+
+# Documentation backups
+*.backup
