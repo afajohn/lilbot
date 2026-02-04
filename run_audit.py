@@ -632,6 +632,12 @@ def main():
         action='store_true',
         help='Enable fast mode with aggressive timeouts (90s analysis timeout) for faster but potentially less reliable results'
     )
+    parser.add_argument(
+        '--verify-batch-size',
+        type=int,
+        default=10,
+        help='Number of URLs after which to verify batch completion and re-queue incomplete rows (default: 10)'
+    )
     
     args = parser.parse_args()
     
@@ -672,6 +678,10 @@ def main():
     
     if args.refresh_interval < 0:
         print("Error: --refresh-interval must be >= 0")
+        sys.exit(1)
+    
+    if args.verify_batch_size < 1:
+        print("Error: --verify-batch-size must be >= 1")
         sys.exit(1)
     
     if not args.tab:
@@ -909,12 +919,21 @@ def main():
         log.info(f"URL filter pattern: {args.filter}")
     if args.url_delay > 0:
         log.info(f"Inter-URL delay: {args.url_delay} second{'s' if args.url_delay != 1 else ''}")
+    log.info(f"Batch verification: every {args.verify_batch_size} URL{'s' if args.verify_batch_size != 1 else ''}")
     log.info("")
     
     metrics_collector = get_metrics_collector()
     metrics_collector.start_sequential_processing()
     
     results = []
+    batch_rows = []  # Track row indices in current batch
+    requeued_urls = []  # Track URLs that were requeued due to verification failure
+    
+    # Build a dictionary for faster URL lookup by row index
+    url_data_by_row = {}
+    for url_data in urls:
+        row_index, url, m_psi, d_psi, skip = url_data
+        url_data_by_row[row_index] = (row_index, url, m_psi, d_psi, skip)
     
     try:
         for idx, url_data in enumerate(urls, start=1):
@@ -940,6 +959,43 @@ def main():
             )
             results.append(result)
             
+            # Track row index for batch verification (only for successfully processed URLs)
+            if result.get('success', False) and not result.get('skipped', False):
+                batch_rows.append(result['row'])
+            
+            # Verify batch completion when batch size is reached
+            if len(batch_rows) >= args.verify_batch_size:
+                if not args.dry_run:
+                    log.info("")
+                    log.info(f"Verifying batch completion for {len(batch_rows)} rows...")
+                    try:
+                        incomplete_rows = sheets_client.verify_batch_completion(
+                            args.spreadsheet_id,
+                            args.tab,
+                            batch_rows,
+                            service=service
+                        )
+                        
+                        if incomplete_rows:
+                            log.warning(f"Found {len(incomplete_rows)} incomplete rows, re-queuing for processing...")
+                            
+                            # Find URL data for incomplete rows and add back to urls list
+                            for incomplete_row in incomplete_rows:
+                                if incomplete_row in url_data_by_row:
+                                    row_index, url, m_psi, d_psi, skip = url_data_by_row[incomplete_row]
+                                    # Re-queue this URL at the end
+                                    urls.append((row_index, url, None, None, False))  # Reset PSI values and force skip=False for reprocessing
+                                    requeued_urls.append(incomplete_row)
+                                    log.info(f"  Re-queued row {incomplete_row}: {url}")
+                        else:
+                            log.info(f"All {len(batch_rows)} rows verified complete")
+                    except Exception as e:
+                        log.error(f"Batch verification failed: {e}")
+                    log.info("")
+                
+                # Reset batch tracking
+                batch_rows = []
+            
             # Apply inter-URL delay (skip for first URL and skipped URLs)
             if args.url_delay > 0 and idx < len(urls):
                 # Skip delay if this was the first URL
@@ -964,6 +1020,30 @@ def main():
                         log.info(f"Sequential processing: {seq_stats['urls_per_minute']:.2f} URLs/min, estimated {estimated_minutes:.1f} minutes remaining")
                     else:
                         log.info(f"Sequential processing: calculating rate...")
+        
+        # Verify any remaining batch rows at the end
+        if batch_rows and not args.dry_run:
+            log.info("")
+            log.info(f"Verifying final batch completion for {len(batch_rows)} rows...")
+            try:
+                incomplete_rows = sheets_client.verify_batch_completion(
+                    args.spreadsheet_id,
+                    args.tab,
+                    batch_rows,
+                    service=service
+                )
+                
+                if incomplete_rows:
+                    log.warning(f"Found {len(incomplete_rows)} incomplete rows in final batch")
+                    for incomplete_row in incomplete_rows:
+                        if incomplete_row in url_data_by_row:
+                            row_index, url, m_psi, d_psi, skip = url_data_by_row[incomplete_row]
+                            log.warning(f"  Row {incomplete_row} incomplete: {url}")
+                else:
+                    log.info(f"All {len(batch_rows)} rows in final batch verified complete")
+            except Exception as e:
+                log.error(f"Final batch verification failed: {e}")
+            log.info("")
     except KeyboardInterrupt:
         log.info("Keyboard interrupt received. Shutting down...")
     
@@ -997,6 +1077,8 @@ def main():
         log.info(f"URLs failed validation: {validation_failed}")
     if invalid_url > 0:
         log.info(f"Invalid URLs: {invalid_url}")
+    if requeued_urls:
+        log.info(f"URLs re-queued after verification: {len(set(requeued_urls))}")
     log.info("")
     log.info(f"Mobile scores >= {SCORE_THRESHOLD}: {mobile_pass}")
     log.info(f"Mobile scores < {SCORE_THRESHOLD}: {mobile_fail}")

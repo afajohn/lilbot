@@ -705,3 +705,75 @@ def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple
                 tab_name=tab_name,
                 updates=chunk
             )
+
+
+def verify_batch_completion(spreadsheet_id: str, tab_name: str, row_indices: List[int], service=None, service_account_file: Optional[str] = None) -> List[int]:
+    """
+    Verify that F and G cells are filled for given rows by re-reading them from the spreadsheet.
+    Returns list of row indices where either F or G cell is empty.
+    
+    Args:
+        spreadsheet_id: The ID of the Google Spreadsheet
+        tab_name: The name of the tab/sheet to verify
+        row_indices: List of row numbers (1-based) to verify
+        service: Optional authenticated service object. If not provided, service_account_file must be provided
+        service_account_file: Optional path to service account JSON file. Used if service is not provided
+        
+    Returns:
+        List of row indices where either F or G cell is empty (incomplete rows)
+        
+    Raises:
+        PermanentError: If there's a permission or resource error
+    """
+    if not row_indices:
+        return []
+    
+    if service is None:
+        if service_account_file is None:
+            raise ValueError("Either service or service_account_file must be provided")
+        service = authenticate(service_account_file)
+    
+    logger = get_logger()
+    sheet = service.spreadsheets()
+    
+    # Build ranges for all F and G cells to verify
+    ranges = []
+    for row_idx in row_indices:
+        ranges.append(f"{tab_name}!F{row_idx}")
+        ranges.append(f"{tab_name}!G{row_idx}")
+    
+    def _read_batch():
+        return sheet.values().batchGet(
+            spreadsheetId=spreadsheet_id,
+            ranges=ranges
+        ).execute()
+    
+    try:
+        result = _execute_with_retry(_read_batch)
+    except PermanentError:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to verify batch completion: {e}")
+        raise
+    
+    value_ranges = result.get('valueRanges', [])
+    
+    incomplete_rows = []
+    
+    # Process results - each row has 2 ranges (F and G)
+    for i, row_idx in enumerate(row_indices):
+        f_range_idx = i * 2
+        g_range_idx = i * 2 + 1
+        
+        f_values = value_ranges[f_range_idx].get('values', []) if f_range_idx < len(value_ranges) else []
+        g_values = value_ranges[g_range_idx].get('values', []) if g_range_idx < len(value_ranges) else []
+        
+        f_cell = f_values[0][0].strip() if f_values and f_values[0] and f_values[0][0] else None
+        g_cell = g_values[0][0].strip() if g_values and g_values[0] and g_values[0][0] else None
+        
+        # Row is incomplete if either F or G is empty
+        if not f_cell or not g_cell:
+            incomplete_rows.append(row_idx)
+            logger.warning(f"Row {row_idx} verification failed: F={'empty' if not f_cell else 'filled'}, G={'empty' if not g_cell else 'filled'}")
+    
+    return incomplete_rows
