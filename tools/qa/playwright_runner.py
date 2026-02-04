@@ -1340,6 +1340,58 @@ def _monitor_process_memory(instance: PlaywrightInstance, max_memory_mb: float =
     return memory_mb >= max_memory_mb
 
 
+async def _cleanup_browser_context(instance: PlaywrightInstance) -> Tuple[float, float]:
+    """
+    Clean up browser context after analysis to free memory and remove state.
+    Clears cookies, localStorage, sessionStorage, and cache.
+    
+    Args:
+        instance: PlaywrightInstance to clean up
+        
+    Returns:
+        Tuple of (memory_before_mb, memory_after_mb)
+    """
+    logger = get_logger()
+    
+    memory_before = instance.get_memory_usage()
+    
+    try:
+        context = instance.context
+        if context is None:
+            logger.debug(f"{_get_thread_info()} No context to clean up for instance PID {instance.pid}")
+            return memory_before, memory_before
+        
+        _log_thread_operation(logger, f"Cleaning up browser context", f"PID: {instance.pid}, Memory before: {memory_before:.1f}MB")
+        
+        await context.clear_cookies()
+        
+        pages = context.pages
+        for page in pages:
+            try:
+                await page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
+            except Exception as e:
+                if DEBUG_MODE:
+                    logger.debug(f"Failed to clear storage for page: {e}")
+        
+        await asyncio.sleep(0.5)
+        
+        memory_after = instance.get_memory_usage()
+        memory_saved = memory_before - memory_after
+        
+        _log_thread_operation(
+            logger, 
+            f"Browser context cleanup completed", 
+            f"PID: {instance.pid}, Memory after: {memory_after:.1f}MB, Saved: {memory_saved:.1f}MB"
+        )
+        
+        return memory_before, memory_after
+        
+    except Exception as e:
+        logger.error(f"{_get_thread_info()} Error during browser context cleanup for PID {instance.pid}: {e}")
+        memory_after = instance.get_memory_usage()
+        return memory_before, memory_after
+
+
 async def _reload_page_with_retry(page: Page, url: str, reload_tracker: PageReloadTracker, logger) -> bool:
     """
     Reload the page with retry logic.
@@ -1759,6 +1811,11 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
                     screenshot_path = await _save_debug_screenshot(page, url, "input_not_found")
                     html_path = await _save_debug_html(page, url, "input_not_found")
                 
+                try:
+                    await _cleanup_browser_context(instance)
+                except Exception as cleanup_error:
+                    logger.debug(f"Cleanup failed during error handling: {cleanup_error}")
+                
                 await pool.return_instance(instance, success=False)
                 error_msg = await _create_enhanced_error_message(
                     f"Failed to find URL input field: {e}",
@@ -1778,6 +1835,11 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
             page_load_start = time.time()
             button_clicked = await _click_analyze_button(page, url, reload_tracker, timeout_ms=10000)
             if not button_clicked:
+                try:
+                    await _cleanup_browser_context(instance)
+                except Exception as cleanup_error:
+                    logger.debug(f"Cleanup failed during error handling: {cleanup_error}")
+                
                 await pool.return_instance(instance, success=False)
                 raise PlaywrightSelectorTimeoutError("Failed to click analyze button - all selectors failed")
             
@@ -1797,6 +1859,11 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
                         screenshot_path = await _save_debug_screenshot(page, url, "analysis_timeout")
                         html_path = await _save_debug_html(page, url, "analysis_timeout")
                     
+                    try:
+                        await _cleanup_browser_context(instance)
+                    except Exception as cleanup_error:
+                        logger.debug(f"Cleanup failed during error handling: {cleanup_error}")
+                    
                     await pool.return_instance(instance, success=False)
                     error_msg = await _create_enhanced_error_message(
                         f"Analysis exceeded {timeout} seconds timeout",
@@ -1814,6 +1881,11 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
                     screenshot_path = await _save_debug_screenshot(page, url, "completion_timeout")
                     html_path = await _save_debug_html(page, url, "completion_timeout")
                 
+                try:
+                    await _cleanup_browser_context(instance)
+                except Exception as cleanup_error:
+                    logger.debug(f"Cleanup failed during error handling: {cleanup_error}")
+                
                 await pool.return_instance(instance, success=False)
                 error_msg = await _create_enhanced_error_message(
                     "Analysis did not complete - score elements not found",
@@ -1830,6 +1902,12 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
             
             if _monitor_process_memory(instance, max_memory_mb=PlaywrightPool.MAX_MEMORY_MB):
                 logger.warning(f"Playwright process exceeded memory limit ({PlaywrightPool.MAX_MEMORY_MB}MB)")
+                
+                try:
+                    await _cleanup_browser_context(instance)
+                except Exception as cleanup_error:
+                    logger.debug(f"Cleanup failed during error handling: {cleanup_error}")
+                
                 await pool.return_instance(instance, success=False)
                 raise PlaywrightRunnerError("Playwright process exceeded memory limit")
             
@@ -1897,6 +1975,11 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
                     screenshot_path = await _save_debug_screenshot(page, url, "desktop_switch_failed")
                     html_path = await _save_debug_html(page, url, "desktop_switch_failed")
                 
+                try:
+                    await _cleanup_browser_context(instance)
+                except Exception as cleanup_error:
+                    logger.debug(f"Cleanup failed during error handling: {cleanup_error}")
+                
                 await pool.return_instance(instance, success=False)
                 error_msg = await _create_enhanced_error_message(
                     "Failed to switch to desktop view with all selectors",
@@ -1914,6 +1997,11 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
                 if DEBUG_MODE or get_debug_mode():
                     screenshot_path = await _save_debug_screenshot(page, url, "no_scores_extracted")
                     html_path = await _save_debug_html(page, url, "no_scores_extracted")
+                
+                try:
+                    await _cleanup_browser_context(instance)
+                except Exception as cleanup_error:
+                    logger.debug(f"Cleanup failed during error handling: {cleanup_error}")
                 
                 await pool.return_instance(instance, success=False)
                 error_msg = await _create_enhanced_error_message(
@@ -1942,6 +2030,9 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
             )
             
             await page.close()
+            
+            memory_before, memory_after = await _cleanup_browser_context(instance)
+            
             await pool.return_instance(instance, success=True)
             
             return {
@@ -1954,7 +2045,9 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
                 '_browser_startup_time': browser_startup_time,
                 '_memory_mb': instance.get_memory_usage(),
                 '_blocked_requests': instance.blocking_stats.blocked_requests,
-                '_total_requests': instance.blocking_stats.total_requests
+                '_total_requests': instance.blocking_stats.total_requests,
+                '_memory_before_cleanup': memory_before,
+                '_memory_after_cleanup': memory_after
             }
             
         except (PlaywrightAnalysisTimeoutError, PlaywrightSelectorTimeoutError):
@@ -1963,6 +2056,12 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
                     await page.close()
                 except Exception:
                     pass
+            
+            try:
+                await _cleanup_browser_context(instance)
+            except Exception as cleanup_error:
+                logger.debug(f"Cleanup failed during error handling: {cleanup_error}")
+            
             await pool.return_instance(instance, success=False)
             raise
             
@@ -1978,6 +2077,11 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
                     await page.close()
                 except Exception:
                     pass
+            
+            try:
+                await _cleanup_browser_context(instance)
+            except Exception as cleanup_error:
+                logger.debug(f"Cleanup failed during error handling: {cleanup_error}")
             
             await pool.return_instance(instance, success=False)
             
