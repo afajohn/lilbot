@@ -1744,7 +1744,7 @@ async def _wait_for_device_buttons(page: Page, url: str, reload_tracker: PageRel
     return False
 
 
-async def _wait_for_analysis_completion(page: Page, url: str, reload_tracker: PageReloadTracker, timeout_seconds: int = 180) -> bool:
+async def _wait_for_analysis_completion(page: Page, url: str, reload_tracker: PageReloadTracker, timeout_seconds: int = 120) -> bool:
     """
     Smart polling to wait for PageSpeed Insights analysis to complete.
     Waits for mobile/desktop buttons to appear before proceeding.
@@ -1753,7 +1753,7 @@ async def _wait_for_analysis_completion(page: Page, url: str, reload_tracker: Pa
         page: Playwright page object
         url: URL being analyzed
         reload_tracker: PageReloadTracker for page reload logic
-        timeout_seconds: Maximum time to wait (default: 180)
+        timeout_seconds: Maximum time to wait (default: 120)
         
     Returns:
         True if analysis completed, False if timeout
@@ -1809,7 +1809,7 @@ async def _wait_for_analysis_completion(page: Page, url: str, reload_tracker: Pa
     return False
 
 
-async def _extract_score_from_element(page: Page, view_type: str, url: str, max_retries: int = 5, retry_delay: float = 1.0) -> Optional[int]:
+async def _extract_score_from_element(page: Page, view_type: str, url: str, max_retries: int = 3, retry_delay: float = 0.5) -> Optional[int]:
     """
     Extract score from PageSpeed Insights page for given view type with enhanced reliability.
     
@@ -1821,8 +1821,8 @@ async def _extract_score_from_element(page: Page, view_type: str, url: str, max_
         page: Playwright page object
         view_type: 'mobile' or 'desktop'
         url: URL being analyzed (for error reporting)
-        max_retries: Maximum number of retry attempts (default: 5)
-        retry_delay: Delay in seconds between retries (default: 1.0)
+        max_retries: Maximum number of retry attempts (default: 3)
+        retry_delay: Delay in seconds between retries (default: 0.5)
         
     Returns:
         Score as integer (0-100) or None if not found after all retries
@@ -2016,7 +2016,7 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
                 )
                 raise PlaywrightSelectorTimeoutError(error_msg)
             
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
             
             if DEBUG_MODE:
                 logger.debug("Clicking analyze button...")
@@ -2037,7 +2037,7 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
             if DEBUG_MODE:
                 logger.debug("Waiting for analysis to complete...")
             
-            analysis_completed = await _wait_for_analysis_completion(page, url, reload_tracker, timeout_seconds=min(180, timeout))
+            analysis_completed = await _wait_for_analysis_completion(page, url, reload_tracker, timeout_seconds=min(120, timeout))
             
             if not analysis_completed:
                 elapsed = time.time() - analysis_start_time
@@ -2110,7 +2110,7 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
             else:
                 last_successful_step = "Device buttons loaded"
             
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             
             if DEBUG_MODE:
                 logger.debug("Extracting mobile score...")
@@ -2121,43 +2121,61 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
             
             mobile_psi_url = _get_psi_report_url(page) if mobile_score and mobile_score < 80 else None
             
-            if DEBUG_MODE:
-                logger.debug("Switching to desktop view...")
-            
-            desktop_button_selectors = [
-                'button:has-text("Desktop")',
-                '[role="tab"]:has-text("Desktop")'
-            ]
-            
             desktop_score = None
             desktop_psi_url = None
             desktop_switched = False
             
-            for selector in desktop_button_selectors:
-                try:
-                    desktop_button = page.locator(selector).first
-                    await desktop_button.click(timeout=5000)
-                    desktop_switched = True
-                    if DEBUG_MODE:
-                        logger.debug(f"Successfully switched to desktop view using selector: {selector}")
-                    last_successful_step = "Switched to desktop view"
-                    break
-                except Exception as e:
-                    if DEBUG_MODE:
-                        logger.debug(f"Failed to switch to desktop with selector {selector}: {e}")
-                    continue
+            # Early exit optimization: Check if we can extract both scores without switching views
+            # Some PageSpeed Insights versions show both scores on the initial mobile view
+            if DEBUG_MODE:
+                logger.debug("Attempting early extraction of desktop score...")
             
-            if desktop_switched:
-                await asyncio.sleep(2)
-                if DEBUG_MODE:
-                    logger.debug("Extracting desktop score...")
-                
-                desktop_score = await _extract_score_from_element(page, 'desktop', url)
-                if desktop_score is not None:
-                    last_successful_step = f"Extracted desktop score: {desktop_score}"
-                
+            desktop_score_early = await _extract_score_from_element(page, 'desktop', url, max_retries=1, retry_delay=0.2)
+            
+            if desktop_score_early is not None and mobile_score is not None:
+                # Both scores extracted without view switch - early exit!
+                desktop_score = desktop_score_early
                 desktop_psi_url = _get_psi_report_url(page) if desktop_score and desktop_score < 80 else None
+                if DEBUG_MODE:
+                    logger.debug(f"Early exit: Both scores extracted without view switch (mobile: {mobile_score}, desktop: {desktop_score})")
+                last_successful_step = f"Extracted both scores (mobile: {mobile_score}, desktop: {desktop_score})"
+                desktop_switched = True  # Mark as switched to skip error handling below
             else:
+                # Need to switch to desktop view
+                if DEBUG_MODE:
+                    logger.debug("Switching to desktop view...")
+                
+                desktop_button_selectors = [
+                    'button:has-text("Desktop")',
+                    '[role="tab"]:has-text("Desktop")'
+                ]
+                
+                for selector in desktop_button_selectors:
+                    try:
+                        desktop_button = page.locator(selector).first
+                        await desktop_button.click(timeout=5000)
+                        desktop_switched = True
+                        if DEBUG_MODE:
+                            logger.debug(f"Successfully switched to desktop view using selector: {selector}")
+                        last_successful_step = "Switched to desktop view"
+                        break
+                    except Exception as e:
+                        if DEBUG_MODE:
+                            logger.debug(f"Failed to switch to desktop with selector {selector}: {e}")
+                        continue
+                
+                if desktop_switched:
+                    await asyncio.sleep(1)
+                    if DEBUG_MODE:
+                        logger.debug("Extracting desktop score...")
+                    
+                    desktop_score = await _extract_score_from_element(page, 'desktop', url)
+                    if desktop_score is not None:
+                        last_successful_step = f"Extracted desktop score: {desktop_score}"
+                    
+                    desktop_psi_url = _get_psi_report_url(page) if desktop_score and desktop_score < 80 else None
+            
+            if not desktop_switched:
                 screenshot_path = None
                 html_path = None
                 if DEBUG_MODE or get_debug_mode():

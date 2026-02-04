@@ -91,8 +91,15 @@ python run_audit.py --tab "TAB_NAME" --url-delay 2
 # Useful for rate limiting, reducing system load, or avoiding detection
 # Recommended values: 1-3 seconds for gentle rate limiting, 5+ seconds for aggressive throttling
 
+# Optional: Fast mode with aggressive timeouts (90s analysis timeout)
+python run_audit.py --tab "TAB_NAME" --fast-mode
+# Faster but potentially less reliable - use for quick audits or when reliability is less critical
+
 # Example: Memory-constrained system with aggressive refresh and delay
 python run_audit.py --tab "TAB_NAME" --refresh-interval 5 --url-delay 1
+
+# Example: Fast mode with no delays for maximum speed
+python run_audit.py --tab "TAB_NAME" --fast-mode --url-delay 0
 ```
 
 **Validate Service Account:**
@@ -440,12 +447,25 @@ The system prioritizes **reliability over speed** with sequential processing:
 
 ### Core Optimizations
 1. **Result Caching**: Redis/file-based cache with 24-hour TTL and LRU eviction (1000 entries max)
-2. **Reduced Timeouts**: Default timeout reduced from 900s to 600s with optimized Playwright timeouts
-3. **Fewer Retries**: Playwright retries reduced from 5 to 2, Python retries from 10 to 3
-4. **Faster Waits**: Inter-action waits reduced from 5-15s to 2s
-5. **Incremental Updates**: Spreadsheet updates happen immediately after each URL (not batched at end)
-6. **Result Streaming**: Results are streamed to avoid large JSON file I/O operations
-7. **Progressive Timeout**: Timeout starts at 300s, increases to 600s after first failure
+2. **Optimized Timeouts**: 
+   - Default analysis timeout: 600s (reliable mode)
+   - Fast mode analysis timeout: 90s (via `--fast-mode` flag)
+   - Analysis completion wait reduced from 180s to 120s
+3. **Fewer Retries**: Score extraction retries reduced from 5 to 3 with 0.5s delay (down from 1.0s)
+4. **Faster Waits**: Inter-action waits reduced from 2s to 1s throughout analysis workflow
+5. **Early Exit Optimization**: When both mobile and desktop scores are available without view switching, analysis completes immediately
+6. **Incremental Updates**: Spreadsheet updates happen immediately after each URL (not batched at end)
+7. **Result Streaming**: Results are streamed to avoid large JSON file I/O operations
+8. **Progressive Timeout**: Timeout starts at 300s, increases to 600s after first failure
+
+### Fast Mode (`--fast-mode`)
+For scenarios where speed is prioritized over maximum reliability:
+- Analysis timeout: 90s (vs 600s default)
+- DNS timeout: 2s (vs 5s default)
+- Redirect timeout: 5s (vs 10s default)
+- Combined with other optimizations for maximum speed
+- Ideal for quick audits, development, or less critical analysis runs
+- Trade-off: Slightly higher chance of timeouts on slow sites
 
 ### Playwright-Specific Optimizations
 

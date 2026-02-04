@@ -627,6 +627,11 @@ def main():
         default=10,
         help='Browser instance refresh interval in number of analyses (default: 10, 0 to disable auto-refresh)'
     )
+    parser.add_argument(
+        '--fast-mode',
+        action='store_true',
+        help='Enable fast mode with aggressive timeouts (90s analysis timeout) for faster but potentially less reliable results'
+    )
     
     args = parser.parse_args()
     
@@ -647,10 +652,19 @@ def main():
         args.service_account = SERVICE_ACCOUNT_FILE
     if args.timeout is None:
         args.timeout = 600
-    if args.dns_timeout is None:
-        args.dns_timeout = 5.0
-    if args.redirect_timeout is None:
-        args.redirect_timeout = 10.0
+    
+    # Fast mode overrides: aggressive timeouts for faster execution
+    if args.fast_mode:
+        args.timeout = 90  # Reduced from 600s default to 90s for fast mode
+        if args.dns_timeout is None:
+            args.dns_timeout = 2.0  # Reduced from 5.0s to 2.0s
+        if args.redirect_timeout is None:
+            args.redirect_timeout = 5.0  # Reduced from 10.0s to 5.0s
+    else:
+        if args.dns_timeout is None:
+            args.dns_timeout = 5.0
+        if args.redirect_timeout is None:
+            args.redirect_timeout = 10.0
     
     if args.url_delay < 0 or args.url_delay > 60:
         print("Error: --url-delay must be between 0 and 60 seconds")
@@ -867,6 +881,8 @@ def main():
         sys.exit(0)
     
     log.info(f"Found {len(urls)} URLs to analyze.")
+    if args.fast_mode:
+        log.info(f"FAST MODE: Aggressive timeouts enabled (analysis: {args.timeout}s, DNS: {args.dns_timeout}s, redirects: {args.redirect_timeout}s)")
     if args.skip_cache:
         log.info("Cache is disabled (--skip-cache flag)")
     if args.dry_run:
