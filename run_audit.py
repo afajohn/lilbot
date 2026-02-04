@@ -59,10 +59,11 @@ def main():
     urls_to_process = []
     url_metadata = {}
     
-    for row_index, url, existing_mobile, existing_desktop, should_skip in url_data:
-        if should_skip:
-            continue
-        if existing_mobile and existing_desktop:
+    for row_index, url, existing_mobile, existing_desktop in url_data:
+        # Skip if both columns have 'passed'
+        mobile_passed = existing_mobile and 'passed' in existing_mobile.lower()
+        desktop_passed = existing_desktop and 'passed' in existing_desktop.lower()
+        if mobile_passed and desktop_passed:
             continue
         
         urls_to_process.append(url)
@@ -138,11 +139,11 @@ def main():
             print(f"✓ {url}: Mobile={mobile_score}, Desktop={desktop_score}")
         
         # Write immediately
-        if updates:
+        for row_idx, col, val in updates:
             try:
-                sheets_client.batch_write_psi_urls(args.spreadsheet_id, args.tab, updates, service=service)
+                sheets_client.write_result(args.spreadsheet_id, args.tab, row_idx, col, val, service)
             except Exception as e:
-                print(f"  Warning: Failed to write results for {url}: {e}")
+                print(f"  Warning: Failed to write {col}{row_idx} for {url}: {e}")
     
     # Print summary
     print("\n" + "=" * 80)
