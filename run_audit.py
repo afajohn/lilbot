@@ -249,6 +249,9 @@ def process_url(
         from_cache = result.get('_from_cache', False)
         metrics_collector.record_url_success(start_time, from_cache=from_cache)
         
+        if not from_cache:
+            metrics_collector.record_sequential_url_processed()
+        
         return {
             'row': row_index,
             'url': url,
@@ -892,6 +895,9 @@ def main():
         log.info(f"Inter-URL delay: {args.url_delay} second{'s' if args.url_delay != 1 else ''}")
     log.info("")
     
+    metrics_collector = get_metrics_collector()
+    metrics_collector.start_sequential_processing()
+    
     results = []
     
     try:
@@ -926,8 +932,22 @@ def main():
                 was_skipped = result.get('skipped', False)
                 
                 if not is_first_url and not was_skipped:
+                    delay_start = time.time()
                     log.info(f"Waiting {args.url_delay} second{'s' if args.url_delay != 1 else ''} before next URL...")
                     time.sleep(args.url_delay)
+                    actual_delay = time.time() - delay_start
+                    metrics_collector.record_inter_url_delay(actual_delay)
+            
+            # Print sequential processing stats every 10 URLs
+            if idx % 10 == 0 and idx > 0:
+                seq_stats = metrics_collector.get_sequential_processing_stats()
+                if seq_stats['active']:
+                    urls_remaining = len(urls) - idx
+                    if seq_stats['urls_per_minute'] > 0:
+                        estimated_minutes = urls_remaining / seq_stats['urls_per_minute']
+                        log.info(f"Sequential processing: {seq_stats['urls_per_minute']:.2f} URLs/min, estimated {estimated_minutes:.1f} minutes remaining")
+                    else:
+                        log.info(f"Sequential processing: calculating rate...")
     except KeyboardInterrupt:
         log.info("Keyboard interrupt received. Shutting down...")
     
@@ -1001,6 +1021,22 @@ def main():
         log.info(f"ERROR indicators written to cells for {failed_analyses} failed analyses.")
     
     log.info("=" * 80)
+    
+    seq_stats = metrics_collector.get_sequential_processing_stats()
+    if seq_stats['active'] and seq_stats['urls_processed'] > 0:
+        log.info("")
+        log.info("=" * 80)
+        log.info("SEQUENTIAL PROCESSING STATISTICS")
+        log.info("=" * 80)
+        log.info(f"Total URLs processed: {seq_stats['urls_processed']}")
+        log.info(f"Total elapsed time: {seq_stats['elapsed_time_seconds'] / 60:.2f} minutes")
+        log.info(f"Processing rate: {seq_stats['urls_per_minute']:.2f} URLs per minute")
+        
+        inter_url_stats = metrics_collector.get_metrics()['inter_url_delays']
+        if inter_url_stats['count'] > 0:
+            log.info(f"Average inter-URL delay: {inter_url_stats['avg_delay_seconds']:.2f} seconds")
+            log.info(f"Total inter-URL delay time: {inter_url_stats['total_delay_seconds'] / 60:.2f} minutes")
+        log.info("=" * 80)
     
     if args.export_json:
         try:

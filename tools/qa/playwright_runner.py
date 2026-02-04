@@ -976,6 +976,10 @@ class PlaywrightPool:
         async with self.lock:
             self._total_refreshes += 1
         
+        from tools.metrics.metrics_collector import get_metrics_collector
+        metrics_collector = get_metrics_collector()
+        metrics_collector.record_browser_refresh()
+        
         self.logger.info(f"{_get_thread_info()} Browser instance refreshed - Old PID: {old_pid}, New PID: {new_instance.pid}, Analyses completed: {old_analyses_count}, Total refreshes: {self._total_refreshes}")
         
         return new_instance
@@ -1008,6 +1012,8 @@ class PlaywrightPool:
                 ]
             
             return {
+                'mode': 'single-instance',
+                'pool_size': 1,
                 'total_instances': 1 if self.instance is not None else 0,
                 'idle_instances': 1 if self.instance is not None and self.instance.state == InstanceState.IDLE else 0,
                 'busy_instances': 1 if self.instance is not None and self.instance.state == InstanceState.BUSY else 0,
@@ -1015,6 +1021,7 @@ class PlaywrightPool:
                 'total_cold_starts': self._total_cold_starts,
                 'total_refreshes': self._total_refreshes,
                 'refresh_interval': self.refresh_interval,
+                'refresh_enabled': self.refresh_interval > 0,
                 'avg_startup_time': self._total_startup_time / self._total_cold_starts if self._total_cold_starts > 0 else 0.0,
                 'instances': instances
             }
@@ -2040,6 +2047,10 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
             if DEBUG_MODE:
                 logger.debug(f"{_get_thread_info()} Instance PID {instance.pid} completed analysis #{instance.analyses_since_refresh} (total: {instance.total_analyses})")
             
+            await page.close()
+
+            memory_before, memory_after = await _cleanup_browser_context(instance)
+
             browser_startup_time = instance.startup_time if not warm_start else 0.0
             metrics_collector.record_playwright_metrics(
                 page_load_time=page_load_time,
@@ -2047,12 +2058,10 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
                 memory_mb=instance.get_memory_usage(),
                 warm_start=warm_start,
                 blocked_requests=instance.blocking_stats.blocked_requests,
-                total_requests=instance.blocking_stats.total_requests
+                total_requests=instance.blocking_stats.total_requests,
+                memory_before_cleanup=memory_before,
+                memory_after_cleanup=memory_after
             )
-            
-            await page.close()
-            
-            memory_before, memory_after = await _cleanup_browser_context(instance)
             
             await pool.return_instance(instance, success=True)
             
@@ -2162,6 +2171,8 @@ def get_pool_stats() -> Dict:
         )
         return future.result(timeout=5.0)
     return {
+        'mode': 'single-instance',
+        'pool_size': 1,
         'total_instances': 0,
         'idle_instances': 0,
         'busy_instances': 0,
@@ -2169,6 +2180,7 @@ def get_pool_stats() -> Dict:
         'total_cold_starts': 0,
         'total_refreshes': 0,
         'refresh_interval': _refresh_interval,
+        'refresh_enabled': _refresh_interval > 0,
         'avg_startup_time': 0.0,
         'instances': []
     }
