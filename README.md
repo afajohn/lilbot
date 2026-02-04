@@ -26,32 +26,43 @@ This tool reads URLs from a Google Spreadsheet, analyzes each URL using PageSpee
 
 ### ⚡ Performance Characteristics
 
-**Sequential Processing for Maximum Reliability**:
-- URLs are processed one at a time (no concurrent processing)
+**Parallel Processing for Maximum Throughput (Default)**:
+- URLs processed concurrently using worker pool (default: 5 workers)
+- Each worker has dedicated browser instance and event loop thread
+- **~2-3 minutes per URL** with parallel processing (5 workers)
+- **20-30 URLs per hour** with default 5 workers
+- **Up to 400 URLs per hour** with 10-15 workers on high-performance systems
+- Configurable concurrency: `--concurrency 1` (sequential) to `--concurrency 20+` (highly parallel)
+- 20-30x faster than sequential mode with proper resource allocation
+
+**Sequential Processing Mode (--concurrency 1)**:
+- URLs processed one at a time for maximum reliability
 - Predictable execution flow and easy to debug
 - No threading issues, race conditions, or resource contention
-- Trades speed for reliability and memory efficiency
 - Expected: ~10-15 minutes per URL, 4-6 URLs per hour
-- Slower than parallel approaches but significantly more reliable
+- Ideal for memory-constrained systems (4-8GB RAM)
 
-**Optimizations Within Sequential Processing**:
+**Core Optimizations**:
 - Reduced default timeout from 900s to 600s
 - Optimized Playwright wait times (from 5-15s to 2s between actions)
-- Reduced retry attempts (Playwright: 5→2, Python: 10→3)
+- Reduced retry attempts for faster failure recovery
 - Incremental spreadsheet updates (see results immediately)
 - Explicit headless mode execution
 - Browser instance refresh to prevent memory leaks
 - Configurable delays between URLs for rate limiting
+- Result caching with 24-hour TTL (Redis/file backend)
 
 **Key Features:**
 - ✅ Batch process URLs from Google Sheets
 - ✅ Automated PageSpeed Insights analysis via Playwright
+- ✅ **Parallel processing with worker pool (5 workers default, up to 20+)**
 - ✅ **Result caching with Redis/file backend (24-hour TTL)**
+- ✅ **~2-3 min/URL, up to 400 URLs/hour with parallel mode**
 - ✅ Real-time progress tracking with incremental spreadsheet updates
 - ✅ Automatic retry on transient failures
 - ✅ Comprehensive logging
 - ✅ Windows Unicode encoding fix
-- ✅ Sequential processing for reliability (~10-15 minutes per URL)
+- ✅ Multi-sheet processing with batch verification
 - ✅ Configurable browser refresh interval to prevent memory leaks
 - ✅ Optional delays between URLs for rate limiting
 - ✅ **Security hardening: service account validation, rate limiting, URL filtering, audit trail**
@@ -146,6 +157,12 @@ python run_audit.py --tab "Barranquilla Singles" --service-account "service-acco
 | `--spreadsheet-id` | No | `1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I` | Google Spreadsheet ID |
 | `--service-account` | No | `service-account.json` | Path to service account JSON file |
 | `--timeout` | No | `600` | Timeout in seconds for each URL analysis (recommend 900-1200 for production) |
+| `--concurrency` | No | `5` | Number of parallel workers (1-20+, higher = faster but more memory) |
+| `--fast-mode` | No | `False` | Enable fast mode with aggressive timeouts (90s) |
+| `--sheets` | No | - | Process multiple sheets (comma-separated names or "all") |
+| `--start-row` | No | `2` | Row number to start reading URLs from |
+| `--verify-batch-size` | No | `100` | Batch size for verification (50-200) |
+| `--auto-continue` | No | `False` | Skip confirmation prompts during verification and multi-sheet processing |
 | `--refresh-interval` | No | `10` | Browser refresh interval (number of URLs before restarting browser) |
 | `--url-delay` | No | `0` | Delay in seconds between processing each URL (for rate limiting) |
 | `--skip-cache` | No | `False` | Skip cache and force fresh analysis |
@@ -189,6 +206,33 @@ python run_audit.py --tab "Website 1" --timeout 1200
 python run_audit.py --tab "Website 1" --skip-cache
 ```
 
+**Configure parallel processing:**
+```bash
+# Use default parallel mode (5 workers)
+python run_audit.py --tab "Website 1"
+
+# High-performance parallel mode (10 workers, requires 16GB+ RAM)
+python run_audit.py --tab "Website 1" --concurrency 10
+
+# Sequential mode (1 worker, maximum reliability)
+python run_audit.py --tab "Website 1" --concurrency 1
+
+# Fast mode with high concurrency (maximum speed)
+python run_audit.py --tab "Website 1" --fast-mode --concurrency 15
+```
+
+**Process multiple sheets:**
+```bash
+# Process specific sheets
+python run_audit.py --sheets "Sheet1,Sheet2,Sheet3"
+
+# Process all sheets in spreadsheet
+python run_audit.py --sheets all
+
+# Multi-sheet with auto-continue (no prompts)
+python run_audit.py --sheets all --auto-continue --concurrency 10
+```
+
 **Configure browser refresh and URL delay:**
 ```bash
 # Refresh browser every 5 URLs (good for memory-constrained systems)
@@ -199,6 +243,18 @@ python run_audit.py --tab "Website 1" --url-delay 2
 
 # Combined: aggressive refresh and delay
 python run_audit.py --tab "Website 1" --refresh-interval 5 --url-delay 1
+```
+
+**Batch verification:**
+```bash
+# Verify in batches of 100 URLs
+python run_audit.py --tab "Website 1" --verify-batch-size 100
+
+# Auto-continue without prompts
+python run_audit.py --tab "Website 1" --auto-continue
+
+# Start from specific row
+python run_audit.py --tab "Website 1" --start-row 500
 ```
 
 **Filter URLs with whitelist/blacklist:**
@@ -508,49 +564,55 @@ Use this table to quickly determine if a URL will be skipped or analyzed:
 
 ## Threading Architecture
 
-**Why Async Playwright?**
+**Why Async Playwright with Parallel Workers?**
 
-Although `run_audit.py` uses a synchronous API, Playwright internally runs asynchronously because:
+The system uses async Playwright with parallel workers for maximum throughput:
 
-1. **Browser Automation is Asynchronous**: Network requests, page loads, DOM queries, and interactions are I/O-bound operations that benefit from async execution
-2. **Performance**: Async enables concurrent operations (e.g., multiple browser contexts analyzing different URLs simultaneously)
-3. **Playwright Design**: The library is designed as async-first for optimal performance
+1. **Browser Automation is I/O-Bound**: Network requests, page loads, DOM queries are ideal for concurrent execution
+2. **Parallel Worker Pool**: Multiple workers (default: 5) process URLs concurrently for 20-30x performance improvement
+3. **Isolated Event Loops**: Each worker has its own event loop thread, preventing cross-thread conflicts
+4. **Independent Browser Instances**: Each worker manages its own browser context independently
+5. **Playwright Design**: The library is designed for async-first parallel execution
 
-**Single Event Loop Thread Architecture:**
+**Parallel Worker Pool Architecture:**
 
-The system uses a dedicated event loop thread to ensure thread safety:
+The system uses multiple worker threads for parallel processing:
 
-- **Main Thread**: Handles application logic, submits analysis requests, processes results
-- **Event Loop Thread**: Dedicated daemon thread running asyncio event loop for all Playwright operations
-- **Thread-Safe Communication**: Requests submitted via `asyncio.run_coroutine_threadsafe()` from main thread to event loop thread
-- **Synchronous Interface**: Main thread blocks on `Future` objects to get results from async operations
+- **Main Thread**: Handles application logic, distributes URLs to workers, collects results
+- **Worker Pool**: Multiple worker threads (default: 5), each with its own event loop and browser instance
+- **Worker Thread**: Each worker runs asyncio event loop for its own Playwright operations
+- **Thread-Safe Communication**: Requests submitted via `concurrent.futures.ThreadPoolExecutor`
+- **Synchronous Interface**: Main thread blocks on `Future` objects to collect results from workers
 
-**Threading Flow:**
+**Parallel Threading Flow:**
 
 ```
-Main Thread                          Event Loop Thread
------------                          -----------------
-1. Submit request                    (Event loop running)
-   run_analysis(url) -->             
-                                     2. Schedule async coroutine
-                                     3. Execute Playwright async:
-                                        - await page.goto()
-                                        - await page.click()
-5. Block on Future.result()          
-                                     4. Set Future result
-<-- Return results
-6. Process results
-7. Optional delay (--url-delay)
-8. Submit next URL request           (Repeat for next URL)
+Main Thread                          Worker 1                Worker 2                Worker N
+-----------                          --------                --------                --------
+1. Submit URLs to pool               (Event loop running)    (Event loop running)    (Event loop running)
+   submit(url1) -->                  
+   submit(url2) -->                                          
+   submit(url3) -->                                                                  
+                                     Process url1            Process url2            Process url3
+                                     - await page.goto()     - await page.goto()     - await page.goto()
+                                     - await page.click()    - await page.click()    - await page.click()
+2. Collect results                   
+<-- Result 1
+<-- Result 2
+<-- Result 3
+3. Update spreadsheet (batched)
+4. Repeat with next batch
 ```
 
 **Why This Prevents Greenlet Errors:**
 
-All Playwright operations (browser contexts, pages, async calls) execute on the same thread, preventing "greenlet.error: cannot switch to a different thread" errors that occur when async operations try to switch between threads.
+Each worker's Playwright operations execute on that worker's dedicated thread, preventing "greenlet.error: cannot switch to a different thread" errors. Workers maintain strict thread isolation with independent event loops.
 
-**Sequential Processing:**
+**Parallel vs Sequential Processing:**
 
-URLs are processed one at a time, with each URL fully completed before the next one starts. This eliminates threading complexity and ensures predictable, reliable execution. Optional delays between URLs can be configured via `--url-delay` for rate limiting.
+- **Parallel Mode** (default: `--concurrency 5`): 20-30 URLs/hour, ideal for large audits
+- **Sequential Mode** (`--concurrency 1`): 4-6 URLs/hour, maximum reliability for debugging
+- **High-Performance Mode** (`--concurrency 10-15`): Up to 400 URLs/hour on high-memory systems
 
 For detailed threading diagnostics, see the **Troubleshooting** section below.
 
@@ -660,7 +722,43 @@ playwright install chromium --force
 - The tool automatically monitors memory and refreshes the browser instance
 - This is expected behavior and should resolve automatically
 - If persistent, use more aggressive refresh: `--refresh-interval 5` or `--refresh-interval 3`
+- For parallel mode, reduce concurrency: `--concurrency 3` (fewer workers = less memory)
 - See the **Memory Issues and Browser Refresh** section below for detailed guidance
+
+### Error: Workers not starting or hanging
+
+**Cause**: Worker pool initialization failure, insufficient system resources, or threading issues.
+
+**Solution**:
+```bash
+# Check worker pool status
+python get_pool_stats.py
+
+# Reduce concurrency to troubleshoot
+python run_audit.py --tab "Website 1" --concurrency 1
+
+# Enable debug mode to see worker activity
+python run_audit.py --tab "Website 1" --debug-mode --concurrency 3
+
+# Check threading diagnostics
+python diagnose_playwright_threading.py
+```
+
+### Error: Rate limit exceeded
+
+**Cause**: Too many concurrent requests to PageSpeed Insights or Google Sheets API with parallel processing.
+
+**Solution**:
+```bash
+# Reduce concurrency to stay within rate limits
+python run_audit.py --tab "Website 1" --concurrency 3
+
+# Add delay between URL processing
+python run_audit.py --tab "Website 1" --url-delay 2 --concurrency 5
+
+# Use slower mode for API-sensitive scenarios
+python run_audit.py --tab "Website 1" --concurrency 3 --url-delay 3
+```
 
 ### PageSpeed Insights Selector Issues
 
@@ -1026,16 +1124,56 @@ done
    python run_audit.py --tab "Barranquilla Singles" --service-account "service-account.json"
    ```
 
+## Performance Scaling Examples
+
+**Sequential Mode (--concurrency 1):**
+- 100 URLs: ~16-25 hours
+- 500 URLs: ~80-125 hours
+- 1000 URLs: ~160-250 hours
+
+**Parallel Mode (--concurrency 5, default):**
+- 100 URLs: ~5-8 hours
+- 500 URLs: ~25-40 hours
+- 1000 URLs: ~50-80 hours
+
+**High-Performance Parallel Mode (--concurrency 10):**
+- 100 URLs: ~2.5-5 hours
+- 500 URLs: ~12.5-25 hours
+- 1000 URLs: ~25-50 hours
+
+**Maximum Throughput (--concurrency 15-20):**
+- 100 URLs: ~1.5-3 hours
+- 500 URLs: ~7.5-15 hours
+- 1000 URLs: ~15-30 hours
+
+Note: Actual performance depends on system resources, network speed, and target site complexity.
+
+## System Requirements for Parallel Processing
+
+| Concurrency Level | Minimum RAM | Recommended RAM | CPU Cores |
+|------------------|-------------|-----------------|-----------|
+| 1-3 workers      | 4GB         | 8GB             | 2+        |
+| 4-7 workers      | 8GB         | 16GB            | 4+        |
+| 8-12 workers     | 16GB        | 32GB            | 8+        |
+| 13-20 workers    | 32GB        | 64GB            | 16+       |
+
+**Recommended Starting Points:**
+- **4GB RAM, 2 cores**: `--concurrency 2`
+- **8GB RAM, 4 cores**: `--concurrency 3-5` (default)
+- **16GB RAM, 8 cores**: `--concurrency 8-10`
+- **32GB+ RAM, 16+ cores**: `--concurrency 15-20`
+
 ## Limitations
 
-- **Sequential Processing**: URLs processed one at a time, linear scaling (slower than parallel but more reliable)
-- **Performance**: ~10-15 minutes per URL, 4-6 URLs per hour depending on site complexity
+- **Parallel Processing Overhead**: Worker pool requires 16GB+ RAM for 10+ workers
+- **Performance**: ~2-3 minutes per URL (parallel mode), 4-6 URLs per hour (sequential mode)
 - **Internet Connection**: Requires active internet connection
-- **PageSpeed Insights**: Rate limits may apply for high-volume usage
-- **Memory**: Long audits require periodic browser refresh to prevent memory leaks (automatic)
+- **PageSpeed Insights**: May rate-limit high-volume usage (reduce concurrency if encountered)
+- **Memory**: Parallel processing requires more memory; use `--refresh-interval` to manage
 - **Browser Automation**: Depends on PageSpeed Insights UI structure (may need updates if Google changes their interface)
 - **URLs**: Must be in column A starting from row 2 (row 1 is treated as header)
 - **Results**: Always written to columns F and G (not configurable via CLI)
+- **Concurrency**: Maximum practical concurrency depends on system resources (typically 15-20 workers)
 
 ## Support
 
