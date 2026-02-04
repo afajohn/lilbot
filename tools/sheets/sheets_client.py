@@ -7,12 +7,8 @@ import time
 import traceback
 
 from tools.utils.exceptions import RetryableError, PermanentError
-from tools.utils.retry import retry_with_backoff
-from tools.utils.error_metrics import get_global_metrics
 from tools.utils.logger import get_logger
 from tools.security.service_account_validator import ServiceAccountValidator
-from tools.security.rate_limiter import get_spreadsheet_rate_limiter
-from tools.security.audit_trail import get_audit_trail
 
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -81,10 +77,6 @@ def _execute_with_retry(func, max_retries: int = 3, initial_delay: float = 2.0):
         Last exception if all retries fail
     """
     logger = get_logger()
-    metrics = get_global_metrics()
-    
-    from tools.metrics.metrics_collector import get_metrics_collector
-    metrics_collector = get_metrics_collector()
     
     delay = initial_delay
     last_exception = None
@@ -94,10 +86,7 @@ def _execute_with_retry(func, max_retries: int = 3, initial_delay: float = 2.0):
     for attempt in range(max_retries + 1):
         try:
             _rate_limiter.acquire()
-            metrics_collector.record_api_call_sheets()
             result = func()
-            if was_retried:
-                metrics.record_success(func_name, was_retried=True)
             return result
             
         except HttpError as e:
@@ -105,43 +94,18 @@ def _execute_with_retry(func, max_retries: int = 3, initial_delay: float = 2.0):
             was_retried = True
             
             if e.resp.status == 403:
-                metrics.record_error(
-                    error_type='PermissionError',
-                    function_name=func_name,
-                    error_message=f"Permission denied (HTTP 403)",
-                    is_retryable=False,
-                    attempt=attempt + 1,
-                    traceback=traceback.format_exc()
-                )
                 raise PermanentError(
                     "Permission denied. Check service account permissions.",
                     original_exception=e
                 )
             
             elif e.resp.status == 404:
-                metrics.record_error(
-                    error_type='NotFoundError',
-                    function_name=func_name,
-                    error_message=f"Resource not found (HTTP 404)",
-                    is_retryable=False,
-                    attempt=attempt + 1,
-                    traceback=traceback.format_exc()
-                )
                 raise PermanentError(
                     "Resource not found.",
                     original_exception=e
                 )
             
             elif e.resp.status == 429 or e.resp.status >= 500:
-                metrics.record_error(
-                    error_type='RetryableHttpError',
-                    function_name=func_name,
-                    error_message=f"HTTP {e.resp.status}: {str(e)}",
-                    is_retryable=True,
-                    attempt=attempt + 1,
-                    traceback=traceback.format_exc()
-                )
-                
                 if attempt < max_retries:
                     actual_delay = min(delay, 60.0)
                     logger.warning(
@@ -158,28 +122,11 @@ def _execute_with_retry(func, max_retries: int = 3, initial_delay: float = 2.0):
                     delay *= 2
                     continue
             else:
-                metrics.record_error(
-                    error_type='UnexpectedHttpError',
-                    function_name=func_name,
-                    error_message=f"HTTP {e.resp.status}: {str(e)}",
-                    is_retryable=False,
-                    attempt=attempt + 1,
-                    traceback=traceback.format_exc()
-                )
                 raise
         
         except Exception as e:
             last_exception = e
             was_retried = True
-            
-            metrics.record_error(
-                error_type=type(e).__name__,
-                function_name=func_name,
-                error_message=str(e),
-                is_retryable=True,
-                attempt=attempt + 1,
-                traceback=traceback.format_exc()
-            )
             
             if attempt < max_retries:
                 logger.warning(
@@ -630,15 +577,11 @@ def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: st
             raise ValueError("Either service or service_account_file must be provided")
         service = authenticate(service_account_file)
     
-    rate_limiter = get_spreadsheet_rate_limiter()
-    audit_trail = get_audit_trail()
     logger = get_logger()
     
     if dry_run:
         logger.info(f"[DRY RUN] Would write to {tab_name}!{column}{row_index}: {url}")
         return
-    
-    rate_limiter.acquire(spreadsheet_id)
     
     with _write_lock:
         sheet = service.spreadsheets()
@@ -657,14 +600,6 @@ def write_psi_url(spreadsheet_id: str, tab_name: str, row_index: int, column: st
             ).execute()
         
         _execute_with_retry(_write)
-        
-        audit_trail.log_modification(
-            spreadsheet_id=spreadsheet_id,
-            tab_name=tab_name,
-            row_index=row_index,
-            column=column,
-            value=url
-        )
 
 
 def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple[int, str, str]], service=None, service_account_file: Optional[str] = None, dry_run: bool = False) -> None:
@@ -691,16 +626,12 @@ def batch_write_psi_urls(spreadsheet_id: str, tab_name: str, updates: List[Tuple
             raise ValueError("Either service or service_account_file must be provided")
         service = authenticate(service_account_file)
     
-    rate_limiter = get_spreadsheet_rate_limiter()
-    audit_trail = get_audit_trail()
     logger = get_logger()
     
     if dry_run:
         for row_index, column, url in updates:
             logger.info(f"[DRY RUN] Would write to {tab_name}!{column}{row_index}: {url}")
         return
-    
-    rate_limiter.acquire(spreadsheet_id)
     
     with _write_lock:
         sheet = service.spreadsheets()

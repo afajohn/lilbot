@@ -21,10 +21,7 @@ except ImportError:
     PlaywrightTimeoutError = Exception
 
 from tools.utils.exceptions import RetryableError, PermanentError
-from tools.utils.circuit_breaker import CircuitBreaker
-from tools.utils.error_metrics import get_global_metrics
 from tools.utils.logger import get_logger
-from tools.cache.cache_manager import get_cache_manager
 
 
 class PlaywrightRunnerError(Exception):
@@ -1023,10 +1020,6 @@ class PlaywrightPool:
         async with self.lock:
             self._total_refreshes += 1
         
-        from tools.metrics.metrics_collector import get_metrics_collector
-        metrics_collector = get_metrics_collector()
-        metrics_collector.record_browser_refresh()
-        
         self.logger.info(f"{_get_thread_info()} Browser context instance refreshed - Analyses completed: {old_analyses_count}, Total refreshes: {self._total_refreshes}")
         
         return new_instance
@@ -1164,23 +1157,7 @@ def _get_event_loop_thread() -> PlaywrightEventLoopThread:
         return _event_loop_thread
 
 
-_circuit_breaker = None
-_circuit_breaker_lock = threading.Lock()
 
-
-def _get_circuit_breaker() -> CircuitBreaker:
-    global _circuit_breaker
-    with _circuit_breaker_lock:
-        if _circuit_breaker is None:
-            logger = get_logger()
-            _circuit_breaker = CircuitBreaker(
-                failure_threshold=5,
-                recovery_timeout=300.0,
-                expected_exception=PlaywrightRunnerError,
-                name="PageSpeedInsights",
-                logger=logger
-            )
-        return _circuit_breaker
 
 
 class ProgressiveTimeout:
@@ -1277,25 +1254,6 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
             "Playwright is not installed. Install it with: pip install playwright && playwright install chromium"
         )
     
-    metrics = get_global_metrics()
-    metrics.increment_total_operations()
-    cache_manager = get_cache_manager(enabled=not skip_cache)
-    
-    from tools.metrics.metrics_collector import get_metrics_collector
-    metrics_collector = get_metrics_collector()
-    
-    if not skip_cache:
-        cached_result = cache_manager.get(url)
-        if cached_result:
-            logger.info(f"Using cached result for {url}")
-            metrics.record_success('run_analysis', was_retried=False)
-            metrics_collector.record_cache_hit()
-            metrics_collector.record_api_call_cypress(0)
-            cached_result['_from_cache'] = True
-            return cached_result
-        else:
-            metrics_collector.record_cache_miss()
-    
     progressive_timeout = _get_progressive_timeout()
     effective_timeout = progressive_timeout.get_timeout()
     if timeout < effective_timeout:
@@ -1315,7 +1273,6 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
         if time.time() - overall_start_time >= timeout:
             elapsed = time.time() - overall_start_time
             logger.error(f"Overall analysis timeout after {elapsed:.1f}s for {url}")
-            metrics.record_failure('run_analysis')
             progressive_timeout.record_failure()
             raise PlaywrightAnalysisTimeoutError(f"Analysis exceeded overall timeout of {timeout}s")
         
@@ -1336,23 +1293,16 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
             
             _log_thread_operation(logger, f"Analysis completed successfully", f"URL: {url}")
             
-            metrics.record_success('run_analysis', was_retried=was_retried)
-            metrics_collector.record_api_call_cypress()
             progressive_timeout.record_success()
-            
-            if not skip_cache:
-                cache_manager.set(url, result)
             
             result['_from_cache'] = False
             return result
             
         except PermanentError:
-            metrics.record_failure('run_analysis')
             progressive_timeout.record_failure()
             raise
             
         except PlaywrightAnalysisTimeoutError:
-            metrics.record_failure('run_analysis')
             progressive_timeout.record_failure()
             raise
             
@@ -1360,15 +1310,6 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
             last_exception = e
             was_retried = True
             progressive_timeout.record_failure()
-            
-            metrics.record_error(
-                error_type='PlaywrightSelectorTimeoutError',
-                function_name='run_analysis',
-                error_message=str(e),
-                is_retryable=True,
-                attempt=attempt,
-                traceback=traceback.format_exc()
-            )
             
             logger.warning(
                 f"Selector timeout for {url}, retrying with fresh page load (attempt {attempt})",
@@ -1416,15 +1357,6 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
                     exc_info=True
                 )
             
-            metrics.record_error(
-                error_type=type(e).__name__,
-                function_name='run_analysis',
-                error_message=str(e),
-                is_retryable=is_retryable,
-                attempt=attempt,
-                traceback=traceback.format_exc()
-            )
-            
             logger.warning(
                 f"{_get_thread_info()} Retryable error for {url}, retrying (attempt {attempt})",
                 extra={
@@ -1466,10 +1398,6 @@ async def run_analysis_batch(urls: List[str], concurrency: int = 2, timeout: int
         raise PermanentError(
             "Playwright is not installed. Install it with: pip install playwright && playwright install chromium"
         )
-    
-    from tools.metrics.metrics_collector import get_metrics_collector
-    metrics_collector = get_metrics_collector()
-    cache_manager = get_cache_manager(enabled=not skip_cache)
     
     event_loop_thread = _get_event_loop_thread()
     
@@ -1913,17 +1841,13 @@ def _get_psi_report_url(page: Page) -> Optional[str]:
 
 async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, force_fresh_instance: bool, pool: PlaywrightPool) -> Dict[str, Optional[int | str]]:
     """
-    Internal async function to run a single Playwright analysis attempt with circuit breaker protection,
+    Internal async function to run a single Playwright analysis attempt with
     result caching, memory monitoring, resource blocking optimizations, and comprehensive error handling.
     """
-    circuit_breaker = _get_circuit_breaker()
     logger = get_logger()
     thread_id = threading.current_thread().ident
     
     _log_thread_operation(logger, f"Starting analysis for {url}")
-    
-    from tools.metrics.metrics_collector import get_metrics_collector
-    metrics_collector = get_metrics_collector()
     
     async def _execute_playwright():
         _log_thread_operation(logger, "Executing Playwright analysis", f"URL: {url}")
@@ -2229,18 +2153,6 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, fo
             await page.close()
 
             memory_before, memory_after = await _cleanup_browser_context(instance)
-
-            browser_startup_time = instance.startup_time if not warm_start else 0.0
-            metrics_collector.record_playwright_metrics(
-                page_load_time=page_load_time,
-                browser_startup_time=browser_startup_time,
-                memory_mb=instance.get_memory_usage(),
-                warm_start=warm_start,
-                blocked_requests=instance.blocking_stats.blocked_requests,
-                total_requests=instance.blocking_stats.total_requests,
-                memory_before_cleanup=memory_before,
-                memory_after_cleanup=memory_after
-            )
             
             await pool.return_instance(instance, success=True)
             
