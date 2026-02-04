@@ -90,10 +90,10 @@ def generate_html_dashboard(metrics: Dict, output_file: str = 'dashboard.html'):
     
     fig.add_trace(
         go.Bar(
-            x=['Sheets API', 'Cypress API'],
-            y=[metrics['api_calls_sheets'], metrics['api_calls_cypress']],
-            marker=dict(color=['#9b59b6', '#1abc9c']),
-            text=[metrics['api_calls_sheets'], metrics['api_calls_cypress']],
+            x=['Sheets API'],
+            y=[metrics['api_calls_sheets']],
+            marker=dict(color=['#9b59b6']),
+            text=[metrics['api_calls_sheets']],
             textposition='auto',
             name='API Calls'
         ),
@@ -309,7 +309,7 @@ def generate_html_dashboard(metrics: Dict, output_file: str = 'dashboard.html'):
         <div class="metric-card">
             <h3>API Calls</h3>
             <div class="value">{metrics['total_api_calls']}</div>
-            <div class="subvalue">Sheets: {metrics['api_calls_sheets']}, Cypress: {metrics['api_calls_cypress']}</div>
+            <div class="subvalue">Sheets: {metrics['api_calls_sheets']}</div>
         </div>
     </div>
     

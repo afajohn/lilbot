@@ -65,31 +65,27 @@ def check_nodejs():
     
     return node_ok and npm_ok
 
-def check_cypress():
-    print("\n=== Checking Cypress ===")
+def check_playwright():
+    print("\n=== Checking Playwright ===")
     
-    if not os.path.exists('node_modules'):
-        print_status("node_modules NOT found - run 'npm install'", "fail")
-        return False
-    
-    cypress_path = os.path.join('node_modules', 'cypress')
-    if os.path.exists(cypress_path):
-        print_status("Cypress installed in node_modules", "pass")
-    else:
-        print_status("Cypress NOT installed - run 'npm install'", "fail")
+    try:
+        import playwright
+        print_status("Playwright Python package installed", "pass")
+    except ImportError:
+        print_status("Playwright NOT installed - run 'pip install playwright'", "fail")
         return False
     
     try:
-        result = subprocess.run(['npx', 'cypress', 'version'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
+        result = subprocess.run(['playwright', '--version'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
         if result.returncode == 0:
-            print_status("Cypress executable working", "pass")
-            return True
+            print_status(f"Playwright CLI {result.stdout.strip()}", "pass")
         else:
-            print_status("Cypress executable NOT working", "fail")
-            return False
+            print_status("Playwright CLI NOT working", "warn")
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        print_status("Cypress executable NOT working", "fail")
-        return False
+        print_status("Playwright CLI NOT found - browsers may not be installed", "warn")
+        print_status("Run 'playwright install chromium' to install browsers", "warn")
+    
+    return True
 
 def check_service_account():
     print("\n=== Checking Service Account ===")
@@ -205,7 +201,7 @@ def main():
         "Project Structure": check_project_structure(),
         "Python Dependencies": check_python_dependencies(),
         "Node.js & npm": check_nodejs(),
-        "Cypress": check_cypress(),
+        "Playwright": check_playwright(),
         "Service Account": check_service_account(),
         "Google Sheets Access": check_google_sheets_access()
     }

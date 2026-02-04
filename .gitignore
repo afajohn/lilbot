@@ -7,9 +7,6 @@
 # env files (can opt-in for committing if needed)
 .env*
 
-# Node.js (legacy - no longer used)
-node_modules/
-
 # Python
 __pycache__/
 *.py[cod]

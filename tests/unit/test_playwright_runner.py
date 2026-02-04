@@ -57,7 +57,6 @@ def mock_metrics_collector():
     collector = Mock()
     collector.record_cache_hit = Mock()
     collector.record_cache_miss = Mock()
-    collector.record_api_call_cypress = Mock()
     collector.record_playwright_metrics = Mock()
     
     with patch('tools.metrics.metrics_collector.get_metrics_collector', return_value=collector):
@@ -440,7 +439,7 @@ class TestPlaywrightPool:
             with patch.object(instance, 'get_memory_usage', return_value=2048):
                 await pool.return_instance(instance, success=True)
             
-            assert pool.instance is None
+            assert instance not in pool.contexts
         
         asyncio.run(run_test())
     
@@ -456,7 +455,7 @@ class TestPlaywrightPool:
             await pool.return_instance(instance, success=False)
             await pool.return_instance(instance, success=False)
             
-            assert pool.instance is None
+            assert instance not in pool.contexts
         
         asyncio.run(run_test())
     
@@ -470,7 +469,7 @@ class TestPlaywrightPool:
             
             await pool.shutdown()
             
-            assert pool.instance is None
+            assert len(pool.contexts) == 0
         
         asyncio.run(run_test())
 
@@ -608,7 +607,6 @@ class TestMetricsCollection:
         
         mock_metrics.increment_total_operations.assert_called_once()
         mock_metrics.record_success.assert_called_once()
-        mock_metrics_collector.record_api_call_cypress.assert_called()
     
     def test_metrics_recorded_on_failure(
         self, mock_playwright_available, mock_cache_manager, mock_metrics,

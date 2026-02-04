@@ -71,7 +71,7 @@ def generate_docs():
         'tools.sheets.sheets_client',
         'tools.sheets.schema_validator',
         'tools.sheets.data_quality_checker',
-        'tools.qa.cypress_runner',
+        'tools.qa.playwright_runner',
         'tools.cache.cache_manager',
         'tools.metrics.metrics_collector',
         'tools.utils.logger',
