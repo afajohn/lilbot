@@ -47,6 +47,9 @@ redirect-timeout: 10.0
 # Optional: Resume from specific row number
 # resume-from-row: 50
 
+# Optional: Starting row number for reading URLs (default: 2, to skip header)
+# start-row: 2
+
 # Optional: Process only URLs matching this regex pattern
 # filter: "https://example\\.com/.*"
 

@@ -533,9 +533,9 @@ def process_single_sheet(
         if not args.validate_only:
             log.error("\nContinuing with audit despite schema issues...")
     
-    log.info(f"Reading URLs from spreadsheet tab '{tab_name}'...")
+    log.info(f"Reading URLs from spreadsheet tab '{tab_name}' starting from row {args.start_row}...")
     try:
-        urls = sheets_client.read_urls(spreadsheet_id, tab_name, service=service)
+        urls = sheets_client.read_urls(spreadsheet_id, tab_name, service=service, start_row=args.start_row)
         log.info(f"Successfully read URLs from spreadsheet")
     except PermanentError as e:
         log.error(f"\n{e}")
@@ -709,6 +709,7 @@ def process_single_sheet(
         log.info(f"URL filter pattern: {args.filter}")
     if args.url_delay > 0:
         log.info(f"Inter-URL delay: {args.url_delay} second{'s' if args.url_delay != 1 else ''}")
+    log.info(f"Starting row: {args.start_row}")
     log.info(f"Batch verification: every {args.verify_batch_size} URL{'s' if args.verify_batch_size != 1 else ''}")
     log.info("")
     
@@ -838,6 +839,46 @@ def process_single_sheet(
     
     if shutdown_requested:
         log.info("\nAudit interrupted by user. Partial results below.\n")
+    
+    # End-of-sheet verification: Re-check all processed rows for incomplete cells
+    if not args.dry_run and not args.validate_only:
+        # Collect all rows that were actually processed (not skipped)
+        processed_rows = [r['row'] for r in results if not r.get('skipped', False) and 'row' in r]
+        
+        if processed_rows:
+            log.info("")
+            log.info("=" * 80)
+            log.info("END-OF-SHEET VERIFICATION")
+            log.info("=" * 80)
+            
+            try:
+                incomplete_rows = sheets_client.verify_end_of_sheet_completion(
+                    spreadsheet_id,
+                    tab_name,
+                    processed_rows,
+                    service=service
+                )
+                
+                if incomplete_rows:
+                    log.warning("")
+                    log.warning(f"WARNING: {len(incomplete_rows)} row(s) were processed but have empty cells after completion:")
+                    for row_idx, f_status, g_status in incomplete_rows:
+                        # Find the URL for this row
+                        url_for_row = None
+                        for r in results:
+                            if r.get('row') == row_idx:
+                                url_for_row = r.get('url', 'Unknown URL')
+                                break
+                        log.warning(f"  Row {row_idx}: {url_for_row} - F={f_status}, G={g_status}")
+                    log.warning("")
+                    log.warning("These rows may require manual review or re-processing.")
+                else:
+                    log.info("All processed rows verified complete - no empty cells found.")
+            except Exception as e:
+                log.error(f"End-of-sheet verification failed: {e}")
+            
+            log.info("=" * 80)
+            log.info("")
     
     # Calculate statistics
     total_urls = len(results)
@@ -1127,6 +1168,12 @@ def main():
         default=None,
         help='Comma-separated list of sheet names for batch processing'
     )
+    parser.add_argument(
+        '--start-row',
+        type=int,
+        default=2,
+        help='Starting row number for reading URLs (1-based, default: 2 to skip header)'
+    )
     
     args = parser.parse_args()
     
@@ -1171,6 +1218,10 @@ def main():
     
     if args.verify_batch_size < 1:
         print("Error: --verify-batch-size must be >= 1")
+        sys.exit(1)
+    
+    if args.start_row < 1:
+        print("Error: --start-row must be >= 1")
         sys.exit(1)
     
     # Determine which sheets to process

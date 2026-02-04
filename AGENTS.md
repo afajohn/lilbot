@@ -57,6 +57,9 @@ python run_audit.py --tab "TAB_NAME" --whitelist "https://example.com/*" --black
 # Optional: Resume from specific row (for interrupted audits)
 python run_audit.py --tab "TAB_NAME" --resume-from-row 50
 
+# Optional: Start reading from a specific row (default: 2, to skip header)
+python run_audit.py --tab "TAB_NAME" --start-row 3
+
 # Optional: Process only URLs matching regex pattern
 python run_audit.py --tab "TAB_NAME" --filter "https://example\.com/.*"
 

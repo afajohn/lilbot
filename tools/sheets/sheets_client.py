@@ -291,9 +291,9 @@ def list_tabs(spreadsheet_id: str, service=None, service_account_file: Optional[
         raise
 
 
-def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_file: Optional[str] = None) -> List[Tuple[int, str, Optional[str], Optional[str], bool]]:
+def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_file: Optional[str] = None, start_row: int = 2) -> List[Tuple[int, str, Optional[str], Optional[str], bool]]:
     """
-    Read URLs from column A of a spreadsheet tab, starting from row 2 (skipping header).
+    Read URLs from column A of a spreadsheet tab, starting from specified row (default: row 2, skipping header).
     Also reads existing PSI URLs from columns F and G and checks for skip conditions.
     Reads all data (A:G) in a single API call.
     
@@ -302,6 +302,7 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
         tab_name: The name of the tab/sheet to read from
         service: Optional authenticated service object. If not provided, service_account_file must be provided
         service_account_file: Optional path to service account JSON file. Used if service is not provided
+        start_row: Starting row number (1-based, default: 2 to skip header)
         
     Returns:
         List of tuples containing (row_index, url, mobile_psi_url, desktop_psi_url, should_skip) where:
@@ -310,14 +311,20 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
         
     Raises:
         PermanentError: If tab doesn't exist or permission denied
+        ValueError: If start_row is less than 1
     """
+    logger = get_logger()
+    
+    if start_row < 1:
+        raise ValueError(f"start_row must be >= 1, got {start_row}")
+    
     if service is None:
         if service_account_file is None:
             raise ValueError("Either service or service_account_file must be provided")
         service = authenticate(service_account_file)
     
     sheet = service.spreadsheets()
-    range_name = f"{tab_name}!A2:G"
+    range_name = f"{tab_name}!A{start_row}:G"
     
     def _read():
         result = sheet.values().get(
@@ -363,16 +370,39 @@ def read_urls(spreadsheet_id: str, tab_name: str, service=None, service_account_
         row_data = sheet_data.get('rowData', [])
     
     urls = []
-    for idx, row in enumerate(values, start=2):
+    for idx, row in enumerate(values, start=start_row):
         if row and row[0]:
             url = row[0].strip()
             if url:
                 mobile_psi_url = row[5].strip() if len(row) > 5 and row[5] else None
                 desktop_psi_url = row[6].strip() if len(row) > 6 and row[6] else None
                 
-                should_skip = _check_skip_conditions(row_data, idx - 2, row)
+                should_skip = _check_skip_conditions(row_data, idx - start_row, row)
                 
                 urls.append((idx, url, mobile_psi_url, desktop_psi_url, should_skip))
+    
+    # Validate that first row fetched is the expected start_row
+    if urls and urls[0][0] != start_row:
+        logger.warning(
+            f"Row validation warning: Expected first row to be {start_row}, but got {urls[0][0]}. "
+            f"This may indicate an issue with row indexing.",
+            extra={
+                'expected_start_row': start_row,
+                'actual_first_row': urls[0][0],
+                'spreadsheet_id': spreadsheet_id,
+                'tab_name': tab_name
+            }
+        )
+    elif urls:
+        logger.debug(
+            f"Row validation passed: First row fetched is {urls[0][0]} (expected: {start_row})",
+            extra={
+                'start_row': start_row,
+                'first_row': urls[0][0],
+                'spreadsheet_id': spreadsheet_id,
+                'tab_name': tab_name
+            }
+        )
     
     return urls
 
@@ -775,5 +805,104 @@ def verify_batch_completion(spreadsheet_id: str, tab_name: str, row_indices: Lis
         if not f_cell or not g_cell:
             incomplete_rows.append(row_idx)
             logger.warning(f"Row {row_idx} verification failed: F={'empty' if not f_cell else 'filled'}, G={'empty' if not g_cell else 'filled'}")
+    
+    return incomplete_rows
+
+
+def verify_end_of_sheet_completion(spreadsheet_id: str, tab_name: str, processed_row_indices: List[int], service=None, service_account_file: Optional[str] = None) -> List[Tuple[int, str, str]]:
+    """
+    Re-check all processed rows at end of sheet to identify any with empty F/G cells.
+    This is the final verification step to ensure all rows were actually completed.
+    
+    Args:
+        spreadsheet_id: The ID of the Google Spreadsheet
+        tab_name: The name of the tab/sheet to verify
+        processed_row_indices: List of row numbers (1-based) that were processed
+        service: Optional authenticated service object. If not provided, service_account_file must be provided
+        service_account_file: Optional path to service account JSON file. Used if service is not provided
+        
+    Returns:
+        List of tuples containing (row_index, f_cell_status, g_cell_status) for incomplete rows
+        where f_cell_status and g_cell_status are 'empty' or 'filled'
+        
+    Raises:
+        PermanentError: If there's a permission or resource error
+    """
+    if not processed_row_indices:
+        return []
+    
+    if service is None:
+        if service_account_file is None:
+            raise ValueError("Either service or service_account_file must be provided")
+        service = authenticate(service_account_file)
+    
+    logger = get_logger()
+    sheet = service.spreadsheets()
+    
+    logger.info(f"Running end-of-sheet verification for {len(processed_row_indices)} processed rows...")
+    
+    # Build ranges for all F and G cells to verify
+    ranges = []
+    for row_idx in processed_row_indices:
+        ranges.append(f"{tab_name}!F{row_idx}")
+        ranges.append(f"{tab_name}!G{row_idx}")
+    
+    def _read_batch():
+        return sheet.values().batchGet(
+            spreadsheetId=spreadsheet_id,
+            ranges=ranges
+        ).execute()
+    
+    try:
+        result = _execute_with_retry(_read_batch)
+    except PermanentError:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to verify end-of-sheet completion: {e}")
+        raise
+    
+    value_ranges = result.get('valueRanges', [])
+    
+    incomplete_rows = []
+    
+    # Process results - each row has 2 ranges (F and G)
+    for i, row_idx in enumerate(processed_row_indices):
+        f_range_idx = i * 2
+        g_range_idx = i * 2 + 1
+        
+        f_values = value_ranges[f_range_idx].get('values', []) if f_range_idx < len(value_ranges) else []
+        g_values = value_ranges[g_range_idx].get('values', []) if g_range_idx < len(value_ranges) else []
+        
+        f_cell = f_values[0][0].strip() if f_values and f_values[0] and f_values[0][0] else None
+        g_cell = g_values[0][0].strip() if g_values and g_values[0] and g_values[0][0] else None
+        
+        f_status = 'filled' if f_cell else 'empty'
+        g_status = 'filled' if g_cell else 'empty'
+        
+        # Row is incomplete if either F or G is empty
+        if not f_cell or not g_cell:
+            incomplete_rows.append((row_idx, f_status, g_status))
+            logger.warning(
+                f"End-of-sheet verification: Row {row_idx} incomplete after processing - F={f_status}, G={g_status}",
+                extra={
+                    'row': row_idx,
+                    'f_status': f_status,
+                    'g_status': g_status,
+                    'f_value': f_cell,
+                    'g_value': g_cell
+                }
+            )
+    
+    if incomplete_rows:
+        logger.warning(
+            f"End-of-sheet verification found {len(incomplete_rows)} incomplete rows out of {len(processed_row_indices)} processed rows",
+            extra={
+                'total_processed': len(processed_row_indices),
+                'incomplete_count': len(incomplete_rows),
+                'incomplete_rows': [r[0] for r in incomplete_rows]
+            }
+        )
+    else:
+        logger.info(f"End-of-sheet verification: All {len(processed_row_indices)} processed rows are complete")
     
     return incomplete_rows
