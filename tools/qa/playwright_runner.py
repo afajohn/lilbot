@@ -804,10 +804,10 @@ class PlaywrightEventLoopThread:
 
 class PlaywrightPool:
     MAX_MEMORY_MB = 1024
-    POOL_SIZE = 3
+    POOL_SIZE = 1
     
     def __init__(self, loop: asyncio.AbstractEventLoop, logger, refresh_interval: int = 10):
-        self.instances = []
+        self.instance: Optional[PlaywrightInstance] = None
         self.lock = asyncio.Lock()
         self.logger = logger
         self._shutdown = False
@@ -834,28 +834,27 @@ class PlaywrightPool:
             _log_thread_operation(self.logger, "Playwright instance started", f"Instance ID: {id(self._playwright)}")
     
     async def get_instance(self) -> Optional[PlaywrightInstance]:
-        _log_thread_operation(self.logger, "Getting Playwright instance from pool")
+        _log_thread_operation(self.logger, "Getting Playwright instance")
         
         async with self.lock:
-            for instance in self.instances:
-                if instance.state == InstanceState.IDLE and instance.is_alive():
-                    mem = instance.get_memory_usage()
-                    if mem < self.MAX_MEMORY_MB:
-                        instance.state = InstanceState.BUSY
-                        instance.last_used = time.time()
-                        self._total_warm_starts += 1
-                        _log_thread_operation(self.logger, "Using warm instance", f"PID: {instance.pid}, Memory: {mem:.1f}MB")
-                        return instance
-                    else:
-                        self.logger.info(f"{_get_thread_info()} Killing instance due to high memory: {mem:.1f}MB")
-                        await instance.kill()
-                        self.instances.remove(instance)
+            if self.instance is not None and self.instance.state == InstanceState.IDLE and self.instance.is_alive():
+                mem = self.instance.get_memory_usage()
+                if mem < self.MAX_MEMORY_MB:
+                    self.instance.state = InstanceState.BUSY
+                    self.instance.last_used = time.time()
+                    self._total_warm_starts += 1
+                    _log_thread_operation(self.logger, "Using warm instance", f"PID: {self.instance.pid}, Memory: {mem:.1f}MB")
+                    return self.instance
+                else:
+                    self.logger.info(f"{_get_thread_info()} Killing instance due to high memory: {mem:.1f}MB")
+                    await self.instance.kill()
+                    self.instance = None
         
-        _log_thread_operation(self.logger, "No warm instances available")
+        _log_thread_operation(self.logger, "No instance available, will create new one")
         return None
     
     async def return_instance(self, instance: PlaywrightInstance, success: bool = True):
-        _log_thread_operation(self.logger, "Returning instance to pool", f"Success: {success}, PID: {instance.pid}")
+        _log_thread_operation(self.logger, "Returning instance", f"Success: {success}, PID: {instance.pid}")
         
         async with self.lock:
             if not success:
@@ -865,13 +864,13 @@ class PlaywrightPool:
             mem = instance.get_memory_usage()
             if instance.failures >= 3 or mem >= self.MAX_MEMORY_MB or not instance.is_alive():
                 _log_thread_operation(self.logger, "Killing instance", f"Failures: {instance.failures}, Memory: {mem:.1f}MB, Alive: {instance.is_alive()}")
-                if instance in self.instances:
-                    self.instances.remove(instance)
+                if self.instance == instance:
+                    self.instance = None
                 await instance.kill()
                 return
             
             instance.state = InstanceState.IDLE
-            _log_thread_operation(self.logger, "Instance returned to pool", f"PID: {instance.pid}")
+            _log_thread_operation(self.logger, "Instance returned", f"PID: {instance.pid}")
     
     async def create_instance(self) -> PlaywrightInstance:
         startup_start = time.time()
@@ -939,8 +938,7 @@ class PlaywrightPool:
             )
             
             async with self.lock:
-                if len(self.instances) < self.POOL_SIZE:
-                    self.instances.append(instance)
+                self.instance = instance
                 self._total_cold_starts += 1
                 self._total_startup_time += startup_time
             
@@ -968,8 +966,8 @@ class PlaywrightPool:
         _log_thread_operation(self.logger, "Force refreshing Playwright instance", f"PID: {old_pid}, Analyses since last refresh: {old_analyses_count}")
         
         async with self.lock:
-            if instance in self.instances:
-                self.instances.remove(instance)
+            if self.instance == instance:
+                self.instance = None
         
         await instance.kill()
         
@@ -984,53 +982,76 @@ class PlaywrightPool:
     
     async def cleanup_dead_instances(self):
         async with self.lock:
-            dead_instances = [i for i in self.instances if not i.is_alive() or i.state == InstanceState.DEAD]
-            for instance in dead_instances:
-                await instance.kill()
-                self.instances.remove(instance)
+            if self.instance is not None and (not self.instance.is_alive() or self.instance.state == InstanceState.DEAD):
+                await self.instance.kill()
+                self.instance = None
     
     async def get_pool_stats(self) -> Dict:
         async with self.lock:
+            instances = []
+            if self.instance is not None:
+                instances = [
+                    {
+                        'pid': self.instance.pid,
+                        'state': self.instance.state.value,
+                        'memory_mb': self.instance.get_memory_usage(),
+                        'total_analyses': self.instance.total_analyses,
+                        'analyses_since_refresh': self.instance.analyses_since_refresh,
+                        'avg_page_load_time': self.instance.get_avg_page_load_time(),
+                        'failures': self.instance.failures,
+                        'blocking_stats': {
+                            'total_requests': self.instance.blocking_stats.total_requests,
+                            'blocked_requests': self.instance.blocking_stats.blocked_requests,
+                            'blocking_ratio': self.instance.blocking_stats.get_blocking_ratio()
+                        }
+                    }
+                ]
+            
             return {
-                'total_instances': len(self.instances),
-                'idle_instances': sum(1 for i in self.instances if i.state == InstanceState.IDLE),
-                'busy_instances': sum(1 for i in self.instances if i.state == InstanceState.BUSY),
+                'total_instances': 1 if self.instance is not None else 0,
+                'idle_instances': 1 if self.instance is not None and self.instance.state == InstanceState.IDLE else 0,
+                'busy_instances': 1 if self.instance is not None and self.instance.state == InstanceState.BUSY else 0,
                 'total_warm_starts': self._total_warm_starts,
                 'total_cold_starts': self._total_cold_starts,
                 'total_refreshes': self._total_refreshes,
                 'refresh_interval': self.refresh_interval,
                 'avg_startup_time': self._total_startup_time / self._total_cold_starts if self._total_cold_starts > 0 else 0.0,
-                'instances': [
-                    {
-                        'pid': i.pid,
-                        'state': i.state.value,
-                        'memory_mb': i.get_memory_usage(),
-                        'total_analyses': i.total_analyses,
-                        'analyses_since_refresh': i.analyses_since_refresh,
-                        'avg_page_load_time': i.get_avg_page_load_time(),
-                        'failures': i.failures,
-                        'blocking_stats': {
-                            'total_requests': i.blocking_stats.total_requests,
-                            'blocked_requests': i.blocking_stats.blocked_requests,
-                            'blocking_ratio': i.blocking_stats.get_blocking_ratio()
-                        }
-                    }
-                    for i in self.instances
-                ]
+                'instances': instances
             }
     
     async def shutdown(self):
         self._shutdown = True
         async with self.lock:
-            for instance in self.instances:
-                await instance.kill()
-            self.instances.clear()
+            if self.instance is not None:
+                await self.instance.kill()
+                self.instance = None
             if self._playwright:
                 try:
                     await self._playwright.stop()
                 except Exception:
                     pass
                 self._playwright = None
+    
+    async def drain_pool(self):
+        """
+        Explicitly shutdown and recreate the single browser instance.
+        Useful for forcing a clean state or recovering from errors.
+        """
+        _log_thread_operation(self.logger, "Draining pool - shutting down and recreating instance")
+        
+        async with self.lock:
+            if self.instance is not None:
+                old_pid = self.instance.pid
+                _log_thread_operation(self.logger, "Killing existing instance", f"PID: {old_pid}")
+                await self.instance.kill()
+                self.instance = None
+        
+        _log_thread_operation(self.logger, "Creating fresh instance after drain")
+        new_instance = await self.create_instance()
+        
+        self.logger.info(f"{_get_thread_info()} Pool drained and recreated - New PID: {new_instance.pid}")
+        
+        return new_instance
 
 
 _event_loop_thread = None
@@ -2167,20 +2188,20 @@ async def _force_refresh_all_instances_async(pool: PlaywrightPool) -> int:
         Number of instances refreshed
     """
     logger = get_logger()
-    logger.info(f"{_get_thread_info()} Force refreshing all instances in pool")
+    logger.info(f"{_get_thread_info()} Force refreshing instance")
     
     async with pool.lock:
-        instances_to_refresh = [i for i in pool.instances if i.is_alive()]
+        instance_to_refresh = pool.instance if pool.instance is not None and pool.instance.is_alive() else None
     
     refresh_count = 0
-    for instance in instances_to_refresh:
+    if instance_to_refresh is not None:
         try:
-            await pool.force_refresh_instance(instance)
-            refresh_count += 1
+            await pool.force_refresh_instance(instance_to_refresh)
+            refresh_count = 1
         except Exception as e:
-            logger.error(f"{_get_thread_info()} Failed to refresh instance PID {instance.pid}: {e}")
+            logger.error(f"{_get_thread_info()} Failed to refresh instance PID {instance_to_refresh.pid}: {e}")
     
-    logger.info(f"{_get_thread_info()} Refreshed {refresh_count} instances")
+    logger.info(f"{_get_thread_info()} Refreshed {refresh_count} instance(s)")
     return refresh_count
 
 
@@ -2200,6 +2221,25 @@ def force_refresh_all_instances() -> int:
         )
         return future.result(timeout=30.0)
     return 0
+
+
+def drain_pool() -> bool:
+    """
+    Explicitly shutdown and recreate the single browser instance.
+    Useful for forcing a clean state or recovering from errors.
+    
+    Returns:
+        True if successful, False if pool not initialized
+    """
+    event_loop_thread = _get_event_loop_thread()
+    if event_loop_thread.loop and event_loop_thread._pool:
+        future = asyncio.run_coroutine_threadsafe(
+            event_loop_thread._pool.drain_pool(),
+            event_loop_thread.loop
+        )
+        future.result(timeout=30.0)
+        return True
+    return False
 
 
 def diagnose_threading_issues() -> Dict:
