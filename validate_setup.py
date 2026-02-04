@@ -1,237 +1,220 @@
 #!/usr/bin/env python3
 """
-Setup validation script for PageSpeed Insights Audit Tool
-Checks all prerequisites and configurations before running audits
+Setup validation script for PageSpeed Insights Audit Tool.
+Checks all prerequisites: Python version, Playwright, service account, and Google Sheets API.
 """
 import sys
 import os
 import subprocess
 import json
+import importlib.util
+from typing import Tuple
 
-def print_status(message, status):
-    symbols = {"pass": "✓", "fail": "✗", "warn": "⚠"}
-    colors = {"pass": "\033[92m", "fail": "\033[91m", "warn": "\033[93m"}
-    reset = "\033[0m"
-    
-    symbol = symbols.get(status, "?")
-    color = colors.get(status, "")
-    print(f"{color}[{symbol}]{reset} {message}")
 
-def check_python_dependencies():
-    print("\n=== Checking Python Dependencies ===")
-    required_packages = [
-        'google-auth',
-        'google-auth-oauthlib',
-        'google-auth-httplib2',
-        'google-api-python-client'
-    ]
+def print_status(check_name: str, passed: bool, message: str = ""):
+    """Print check result with pass/fail indicator"""
+    status = "[PASS]" if passed else "[FAIL]"
+    status_color = "\033[92m" if passed else "\033[91m"
+    reset_color = "\033[0m"
     
-    all_installed = True
-    for package in required_packages:
+    full_message = f"{check_name}: {message}" if message else check_name
+    print(f"{status_color}{status:8}{reset_color} | {full_message}")
+
+
+def check_python_version() -> Tuple[bool, str]:
+    """Check Python version >= 3.7"""
+    version = sys.version_info
+    version_str = f"{version.major}.{version.minor}.{version.micro}"
+    
+    if version.major >= 3 and version.minor >= 7:
+        return True, f"Python {version_str}"
+    return False, f"Python {version_str} (requires >= 3.7)"
+
+
+def check_playwright_installed() -> Tuple[bool, str]:
+    """Check if Playwright Python package is installed"""
+    spec = importlib.util.find_spec('playwright')
+    if spec is not None:
         try:
-            __import__(package.replace('-', '_'))
-            print_status(f"{package} installed", "pass")
-        except ImportError:
-            print_status(f"{package} NOT installed", "fail")
-            all_installed = False
-    
-    return all_installed
+            import playwright
+            version = getattr(playwright, '__version__', 'unknown')
+            return True, f"Playwright {version} installed"
+        except Exception as e:
+            return False, f"Playwright import failed: {e}"
+    return False, "Playwright not installed (run: pip install playwright)"
 
-def check_nodejs():
-    print("\n=== Checking Node.js and npm ===")
+
+def check_chromium_browser() -> Tuple[bool, str]:
+    """Check if Chromium browser is installed for Playwright"""
     try:
-        result = subprocess.run(['node', '--version'], capture_output=True, text=True, encoding='utf-8', errors='replace')
-        if result.returncode == 0:
-            print_status(f"Node.js {result.stdout.strip()} installed", "pass")
-            node_ok = True
+        result = subprocess.run(
+            [sys.executable, '-m', 'playwright', 'install', '--dry-run', 'chromium'],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=10
+        )
+        
+        # Check if already installed
+        if 'is already installed' in result.stdout or 'is already installed' in result.stderr:
+            return True, "Chromium browser installed"
         else:
-            print_status("Node.js NOT found", "fail")
-            node_ok = False
+            return False, "Chromium browser missing (run: playwright install chromium)"
+    except subprocess.TimeoutExpired:
+        return False, "Browser check timed out"
     except FileNotFoundError:
-        print_status("Node.js NOT found", "fail")
-        node_ok = False
-    
-    try:
-        result = subprocess.run(['npm', '--version'], capture_output=True, text=True, encoding='utf-8', errors='replace')
-        if result.returncode == 0:
-            print_status(f"npm {result.stdout.strip()} installed", "pass")
-            npm_ok = True
-        else:
-            print_status("npm NOT found", "fail")
-            npm_ok = False
-    except FileNotFoundError:
-        print_status("npm NOT found", "fail")
-        npm_ok = False
-    
-    return node_ok and npm_ok
+        return False, "Playwright CLI not found"
+    except Exception as e:
+        return False, f"Error checking browser: {e}"
 
-def check_playwright():
-    print("\n=== Checking Playwright ===")
-    
-    try:
-        import playwright
-        print_status("Playwright Python package installed", "pass")
-    except ImportError:
-        print_status("Playwright NOT installed - run 'pip install playwright'", "fail")
-        return False
-    
-    try:
-        result = subprocess.run(['playwright', '--version'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
-        if result.returncode == 0:
-            print_status(f"Playwright CLI {result.stdout.strip()}", "pass")
-        else:
-            print_status("Playwright CLI NOT working", "warn")
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        print_status("Playwright CLI NOT found - browsers may not be installed", "warn")
-        print_status("Run 'playwright install chromium' to install browsers", "warn")
-    
-    return True
 
-def check_service_account():
-    print("\n=== Checking Service Account ===")
-    
+def check_service_account_exists() -> Tuple[bool, str]:
+    """Check if service-account.json exists"""
+    if os.path.exists('service-account.json'):
+        return True, "service-account.json found"
+    return False, "service-account.json not found"
+
+
+def check_service_account_valid_json() -> Tuple[bool, str]:
+    """Check if service-account.json is valid JSON with required fields"""
     if not os.path.exists('service-account.json'):
-        print_status("service-account.json NOT found", "fail")
-        print("  → Download from Google Cloud Console")
-        print("  → IAM & Admin > Service Accounts > Keys > Create new key (JSON)")
-        return False
-    
-    print_status("service-account.json exists", "pass")
+        return False, "service-account.json not found"
     
     try:
-        with open('service-account.json', 'r') as f:
+        with open('service-account.json', 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        required_fields = ['type', 'project_id', 'private_key', 'client_email']
-        all_fields_present = True
+        # Check required fields
+        required_fields = [
+            'type', 'project_id', 'private_key_id', 'private_key',
+            'client_email', 'client_id', 'auth_uri', 'token_uri'
+        ]
+        missing_fields = [field for field in required_fields if field not in data]
         
-        for field in required_fields:
-            if field in data:
-                if field == 'client_email':
-                    print_status(f"Service account email: {data[field]}", "pass")
-                else:
-                    print_status(f"Field '{field}' present", "pass")
-            else:
-                print_status(f"Field '{field}' MISSING", "fail")
-                all_fields_present = False
+        if missing_fields:
+            return False, f"Missing fields: {', '.join(missing_fields)}"
         
-        return all_fields_present
+        # Validate type
+        if data.get('type') != 'service_account':
+            return False, f"Invalid type: '{data.get('type')}' (expected 'service_account')"
         
-    except json.JSONDecodeError:
-        print_status("service-account.json is NOT valid JSON", "fail")
-        return False
+        # Validate private key format
+        private_key = data.get('private_key', '')
+        if not private_key.startswith('-----BEGIN PRIVATE KEY-----'):
+            return False, "Invalid private key format"
+        if not private_key.rstrip().endswith('-----END PRIVATE KEY-----'):
+            return False, "Invalid private key format"
+        
+        # Validate email format
+        email = data.get('client_email', '')
+        if '@' not in email or not email.endswith('.iam.gserviceaccount.com'):
+            return False, f"Invalid service account email: {email}"
+        
+        return True, f"Valid JSON with email: {email}"
+        
+    except json.JSONDecodeError as e:
+        return False, f"Invalid JSON: {e}"
     except Exception as e:
-        print_status(f"Error reading service-account.json: {e}", "fail")
-        return False
+        return False, f"Error reading file: {e}"
 
-def check_google_sheets_access():
-    print("\n=== Checking Google Sheets Access ===")
-    
+
+def check_google_sheets_api() -> Tuple[bool, str]:
+    """Test Google Sheets API connection"""
     if not os.path.exists('service-account.json'):
-        print_status("Cannot test - service-account.json missing", "warn")
-        return False
+        return False, "service-account.json not found"
     
+    # Add tools to path
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
     
     try:
         from sheets import sheets_client
         
+        # Test authentication
         try:
             service = sheets_client.authenticate('service-account.json')
-            print_status("Authentication successful", "pass")
         except Exception as e:
-            print_status(f"Authentication FAILED: {e}", "fail")
-            return False
+            return False, f"Authentication failed: {e}"
         
+        # Test spreadsheet access with default spreadsheet
         default_spreadsheet_id = '1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I'
         
         try:
             tabs = sheets_client.list_tabs(default_spreadsheet_id, service=service)
-            print_status(f"Can access spreadsheet (found {len(tabs)} tabs)", "pass")
-            
-            if tabs:
-                print("  Available tabs:")
-                for tab in tabs[:5]:
-                    print(f"    - {tab}")
-                if len(tabs) > 5:
-                    print(f"    ... and {len(tabs) - 5} more")
-            
-            return True
-            
+            return True, f"Connected successfully ({len(tabs)} tabs accessible)"
         except PermissionError:
-            print_status("Access DENIED - spreadsheet not shared with service account", "fail")
-            print("  → Open spreadsheet and share with service account email")
-            return False
-        except ValueError as e:
-            print_status(f"Spreadsheet access error: {e}", "fail")
-            return False
+            return False, "Access denied - share spreadsheet with service account"
+        except Exception as e:
+            return False, f"Spreadsheet access failed: {e}"
             
     except ImportError as e:
-        print_status(f"Cannot import sheets_client: {e}", "fail")
-        return False
+        return False, f"Cannot import sheets_client: {e}"
+    except Exception as e:
+        return False, f"Unexpected error: {e}"
 
-def check_project_structure():
-    print("\n=== Checking Project Structure ===")
-    
-    required_files = [
-        'run_audit.py',
-        'list_tabs.py',
-        'requirements.txt',
-        'tools/sheets/sheets_client.py',
-        'tools/qa/playwright_runner.py',
-        'tools/utils/logger.py'
-    ]
-    
-    all_present = True
-    for file in required_files:
-        if os.path.exists(file):
-            print_status(f"{file}", "pass")
-        else:
-            print_status(f"{file} MISSING", "fail")
-            all_present = False
-    
-    return all_present
 
 def main():
-    print("=" * 60)
-    print("PageSpeed Insights Audit Tool - Setup Validation")
-    print("=" * 60)
+    """Run all validation checks and report results"""
+    print("=" * 80)
+    print("PAGESPEED INSIGHTS AUDIT TOOL - SETUP VALIDATION")
+    print("=" * 80)
+    print()
     
-    results = {
-        "Project Structure": check_project_structure(),
-        "Python Dependencies": check_python_dependencies(),
-        "Node.js & npm": check_nodejs(),
-        "Playwright": check_playwright(),
-        "Service Account": check_service_account(),
-        "Google Sheets Access": check_google_sheets_access()
-    }
+    # Run all checks
+    checks = [
+        ("Python Version", check_python_version),
+        ("Playwright Package", check_playwright_installed),
+        ("Chromium Browser", check_chromium_browser),
+        ("Service Account File", check_service_account_exists),
+        ("Service Account Valid", check_service_account_valid_json),
+        ("Google Sheets API", check_google_sheets_api),
+    ]
     
-    print("\n" + "=" * 60)
-    print("VALIDATION SUMMARY")
-    print("=" * 60)
+    results = {}
+    for check_name, check_func in checks:
+        try:
+            passed, message = check_func()
+            results[check_name] = passed
+            print_status(check_name, passed, message)
+        except Exception as e:
+            results[check_name] = False
+            print_status(check_name, False, f"Check error: {e}")
     
-    for check, passed in results.items():
-        if passed:
-            print_status(f"{check}: OK", "pass")
-        else:
-            print_status(f"{check}: FAILED", "fail")
+    # Print summary
+    print()
+    print("=" * 80)
+    print("SUMMARY")
+    print("=" * 80)
     
     all_passed = all(results.values())
+    passed_count = sum(results.values())
+    total_count = len(results)
     
-    print("\n" + "=" * 60)
+    print(f"Checks passed: {passed_count}/{total_count}")
+    print()
+    
     if all_passed:
-        print_status("All checks passed! You're ready to run audits.", "pass")
-        print("\nNext steps:")
-        print("  1. python list_tabs.py")
-        print('  2. python run_audit.py --tab "TAB_NAME"')
+        print("\033[92m[PASS]\033[0m All checks passed! Setup is complete.")
+        print()
+        print("Next steps:")
+        print("  1. List available tabs:")
+        print("     python list_tabs.py")
+        print()
+        print("  2. Run an audit:")
+        print('     python run_audit.py --tab "TAB_NAME"')
     else:
-        print_status("Some checks failed. Please fix the issues above.", "fail")
-        print("\nFor help, see:")
-        print("  - README.md for setup instructions")
-        print("  - TROUBLESHOOTING.md for common issues")
-    print("=" * 60)
+        print("\033[91m[FAIL]\033[0m Some checks failed. Please fix the issues above.")
+        print()
+        print("Common fixes:")
+        print("  - Install dependencies: pip install -r requirements.txt")
+        print("  - Install browsers: playwright install chromium")
+        print("  - Download service-account.json from Google Cloud Console")
+        print("  - Share spreadsheet with service account email")
+    
+    print("=" * 80)
     
     sys.exit(0 if all_passed else 1)
+
 
 if __name__ == '__main__':
     main()
