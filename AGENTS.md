@@ -79,6 +79,11 @@ python run_audit.py --tab "TAB_NAME" --force-retry
 
 # Optional: Debug mode (verbose logging, screenshots, and HTML capture on errors)
 python run_audit.py --tab "TAB_NAME" --debug-mode
+
+# Optional: Configure browser instance refresh interval (default: 10 analyses)
+python run_audit.py --tab "TAB_NAME" --refresh-interval 20
+# Or disable auto-refresh
+python run_audit.py --tab "TAB_NAME" --refresh-interval 0
 ```
 
 **Validate Service Account:**
@@ -421,6 +426,14 @@ The system has been comprehensively optimized for faster URL processing:
 - Automatic memory monitoring with 1GB threshold per instance
 - Instances are auto-killed after 3 consecutive failures or high memory usage
 - Pool cleanup on application shutdown
+
+**Browser Instance Lifecycle Management**:
+- Auto-refresh: Browser instances are automatically refreshed every N analyses (default: 10)
+- Configurable via `--refresh-interval` flag (0 to disable auto-refresh)
+- Force refresh API: `PlaywrightPool.force_refresh_instance(instance)` to manually refresh
+- Refresh tracking: Each instance tracks `analyses_since_refresh` counter
+- Refresh logging: All refresh events are logged with instance PID and analysis count
+- Pool statistics: Tracks total refreshes and refresh interval configuration
 
 **Network Request Interception & Resource Blocking**:
 - Automatically blocks unnecessary resources to speed up page loads:

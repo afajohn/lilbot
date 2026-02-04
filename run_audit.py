@@ -691,6 +691,12 @@ def main():
         default=5,
         help='Inter-URL delay in seconds (default: 5, range: 0-60)'
     )
+    parser.add_argument(
+        '--refresh-interval',
+        type=int,
+        default=10,
+        help='Browser instance refresh interval in number of analyses (default: 10, 0 to disable auto-refresh)'
+    )
     
     args = parser.parse_args()
     
@@ -720,6 +726,10 @@ def main():
         print("Error: --url-delay must be between 0 and 60 seconds")
         sys.exit(1)
     
+    if args.refresh_interval < 0:
+        print("Error: --refresh-interval must be >= 0")
+        sys.exit(1)
+    
     if not args.tab:
         print("Error: --tab is required (or specify in config file)")
         sys.exit(1)
@@ -738,6 +748,8 @@ def main():
     
     log = logger.setup_logger()
     metrics = get_global_metrics()
+    
+    playwright_runner.set_refresh_interval(args.refresh_interval)
     
     if args.debug_mode:
         playwright_runner.set_debug_mode(True)
@@ -933,6 +945,10 @@ def main():
         log.info("FORCE RETRY MODE: Circuit breaker will be bypassed")
     if args.debug_mode:
         log.info("DEBUG MODE: Screenshots and HTML capture enabled on errors")
+    if args.refresh_interval > 0:
+        log.info(f"Browser instance auto-refresh: every {args.refresh_interval} analyse{'s' if args.refresh_interval != 1 else ''}")
+    else:
+        log.info("Browser instance auto-refresh: disabled")
     if args.whitelist:
         log.info(f"URL whitelist: {args.whitelist}")
     if args.blacklist:

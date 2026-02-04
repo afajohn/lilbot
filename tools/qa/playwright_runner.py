@@ -552,6 +552,7 @@ class PlaywrightInstance:
     total_analyses: int = 0
     total_page_load_time: float = 0.0
     startup_time: float = 0.0
+    analyses_since_refresh: int = 0
     
     def is_alive(self) -> bool:
         if self.browser is None:
@@ -575,11 +576,15 @@ class PlaywrightInstance:
     def record_analysis(self, page_load_time: float):
         self.total_analyses += 1
         self.total_page_load_time += page_load_time
+        self.analyses_since_refresh += 1
     
     def get_avg_page_load_time(self) -> float:
         if self.total_analyses == 0:
             return 0.0
         return self.total_page_load_time / self.total_analyses
+    
+    def should_refresh(self, refresh_interval: int) -> bool:
+        return refresh_interval > 0 and self.analyses_since_refresh >= refresh_interval
     
     async def kill(self):
         if self.browser and self.is_alive():
@@ -598,13 +603,14 @@ class AnalysisRequest:
     url: str
     timeout: int
     force_retry: bool
+    force_fresh_instance: bool
     future: Future
 
 
 class PlaywrightEventLoopThread:
     """Dedicated thread for running Playwright with its own event loop"""
     
-    def __init__(self):
+    def __init__(self, refresh_interval: int = 10):
         self.thread = None
         self.loop = None
         self.request_queue: Queue[Optional[AnalysisRequest]] = Queue()
@@ -614,6 +620,7 @@ class PlaywrightEventLoopThread:
         self._pool: Optional['PlaywrightPool'] = None
         self._health = EventLoopHealth()
         self._heartbeat_task = None
+        self.refresh_interval = refresh_interval
         
     def start(self):
         """Start the event loop thread"""
@@ -697,7 +704,7 @@ class PlaywrightEventLoopThread:
                 try:
                     if self._pool is None:
                         _log_thread_operation(self.logger, "Initializing Playwright pool")
-                        self._pool = PlaywrightPool(self.loop, self.logger)
+                        self._pool = PlaywrightPool(self.loop, self.logger, self.refresh_interval)
                         await self._pool.initialize()
                     
                     is_healthy, status = self._health.check_health()
@@ -709,6 +716,7 @@ class PlaywrightEventLoopThread:
                         request.url,
                         request.timeout,
                         request.force_retry,
+                        request.force_fresh_instance,
                         self._pool
                     )
                     request.future.set_result(result)
@@ -731,7 +739,7 @@ class PlaywrightEventLoopThread:
         
         _log_thread_operation(self.logger, "Request processing ended")
     
-    def submit_analysis(self, url: str, timeout: int, force_retry: bool) -> Future:
+    def submit_analysis(self, url: str, timeout: int, force_retry: bool, force_fresh_instance: bool = False) -> Future:
         """Submit an analysis request and return a Future"""
         caller_thread_info = _get_thread_info()
         _log_thread_operation(self.logger, f"Submitting analysis request from {caller_thread_info}", f"URL: {url}")
@@ -741,6 +749,7 @@ class PlaywrightEventLoopThread:
             url=url,
             timeout=timeout,
             force_retry=force_retry,
+            force_fresh_instance=force_fresh_instance,
             future=future
         )
         self.request_queue.put(request)
@@ -797,7 +806,7 @@ class PlaywrightPool:
     MAX_MEMORY_MB = 1024
     POOL_SIZE = 3
     
-    def __init__(self, loop: asyncio.AbstractEventLoop, logger):
+    def __init__(self, loop: asyncio.AbstractEventLoop, logger, refresh_interval: int = 10):
         self.instances = []
         self.lock = asyncio.Lock()
         self.logger = logger
@@ -807,6 +816,8 @@ class PlaywrightPool:
         self._total_cold_starts = 0
         self._total_startup_time = 0.0
         self.loop = loop
+        self.refresh_interval = refresh_interval
+        self._total_refreshes = 0
     
     async def initialize(self):
         """Initialize the Playwright instance"""
@@ -941,6 +952,36 @@ class PlaywrightPool:
                 _threading_metrics.record_greenlet_error()
             raise PermanentError(f"Failed to create Playwright instance: {e}", original_exception=e)
     
+    async def force_refresh_instance(self, instance: PlaywrightInstance) -> PlaywrightInstance:
+        """
+        Force refresh a browser instance by closing and recreating the browser context.
+        
+        Args:
+            instance: The PlaywrightInstance to refresh
+            
+        Returns:
+            A new PlaywrightInstance with fresh browser context
+        """
+        old_pid = instance.pid
+        old_analyses_count = instance.analyses_since_refresh
+        
+        _log_thread_operation(self.logger, "Force refreshing Playwright instance", f"PID: {old_pid}, Analyses since last refresh: {old_analyses_count}")
+        
+        async with self.lock:
+            if instance in self.instances:
+                self.instances.remove(instance)
+        
+        await instance.kill()
+        
+        new_instance = await self.create_instance()
+        
+        async with self.lock:
+            self._total_refreshes += 1
+        
+        self.logger.info(f"{_get_thread_info()} Browser instance refreshed - Old PID: {old_pid}, New PID: {new_instance.pid}, Analyses completed: {old_analyses_count}, Total refreshes: {self._total_refreshes}")
+        
+        return new_instance
+    
     async def cleanup_dead_instances(self):
         async with self.lock:
             dead_instances = [i for i in self.instances if not i.is_alive() or i.state == InstanceState.DEAD]
@@ -956,6 +997,8 @@ class PlaywrightPool:
                 'busy_instances': sum(1 for i in self.instances if i.state == InstanceState.BUSY),
                 'total_warm_starts': self._total_warm_starts,
                 'total_cold_starts': self._total_cold_starts,
+                'total_refreshes': self._total_refreshes,
+                'refresh_interval': self.refresh_interval,
                 'avg_startup_time': self._total_startup_time / self._total_cold_starts if self._total_cold_starts > 0 else 0.0,
                 'instances': [
                     {
@@ -963,6 +1006,7 @@ class PlaywrightPool:
                         'state': i.state.value,
                         'memory_mb': i.get_memory_usage(),
                         'total_analyses': i.total_analyses,
+                        'analyses_since_refresh': i.analyses_since_refresh,
                         'avg_page_load_time': i.get_avg_page_load_time(),
                         'failures': i.failures,
                         'blocking_stats': {
@@ -991,13 +1035,25 @@ class PlaywrightPool:
 
 _event_loop_thread = None
 _event_loop_thread_lock = threading.Lock()
+_refresh_interval = 10
+
+
+def set_refresh_interval(interval: int):
+    """Set the global refresh interval for browser instances"""
+    global _refresh_interval
+    _refresh_interval = interval
+
+
+def get_refresh_interval() -> int:
+    """Get the current refresh interval"""
+    return _refresh_interval
 
 
 def _get_event_loop_thread() -> PlaywrightEventLoopThread:
     global _event_loop_thread
     with _event_loop_thread_lock:
         if _event_loop_thread is None:
-            _event_loop_thread = PlaywrightEventLoopThread()
+            _event_loop_thread = PlaywrightEventLoopThread(_refresh_interval)
             _event_loop_thread.start()
         return _event_loop_thread
 
@@ -1084,7 +1140,7 @@ async def _setup_request_interception(page: Page, instance: PlaywrightInstance) 
         await page.route('**/*', handle_route)
 
 
-def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_retry: bool = False) -> Dict[str, Optional[int | str]]:
+def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_retry: bool = False, force_fresh_instance: bool = False) -> Dict[str, Optional[int | str]]:
     """
     Run Playwright analysis for a given URL to get PageSpeed Insights scores.
     Implements persistent retry-until-success with exponential backoff for transient errors.
@@ -1094,6 +1150,7 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
         timeout: Maximum time in seconds for overall operation (default: 600)
         skip_cache: If True, bypass cache and force fresh analysis (default: False)
         force_retry: If True, bypass circuit breaker during critical runs (default: False)
+        force_fresh_instance: If True, force use of a fresh browser instance (default: False)
         
     Returns:
         Dictionary with keys:
@@ -1168,7 +1225,7 @@ def run_analysis(url: str, timeout: int = 600, skip_cache: bool = False, force_r
             
             _log_thread_operation(logger, f"Submitting analysis to event loop thread", f"URL: {url}, Attempt: {attempt}")
             
-            future = event_loop_thread.submit_analysis(url, timeout, force_retry)
+            future = event_loop_thread.submit_analysis(url, timeout, force_retry, force_fresh_instance)
             result = future.result(timeout=timeout)
             
             _log_thread_operation(logger, f"Analysis completed successfully", f"URL: {url}")
@@ -1614,7 +1671,7 @@ def _get_psi_report_url(page: Page) -> Optional[str]:
     return None
 
 
-async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, pool: PlaywrightPool) -> Dict[str, Optional[int | str]]:
+async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, force_fresh_instance: bool, pool: PlaywrightPool) -> Dict[str, Optional[int | str]]:
     """
     Internal async function to run a single Playwright analysis attempt with circuit breaker protection,
     result caching, memory monitoring, resource blocking optimizations, and comprehensive error handling.
@@ -1631,8 +1688,25 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, po
     async def _execute_playwright():
         _log_thread_operation(logger, "Executing Playwright analysis", f"URL: {url}")
         
+        # Get instance from pool (may be warm or None if pool empty)
         instance = await pool.get_instance()
         warm_start = instance is not None and instance.warm_start
+        
+        # Handle force fresh instance request (from force_fresh_instance parameter)
+        if force_fresh_instance:
+            if instance is not None:
+                logger.info(f"{_get_thread_info()} Force fresh instance requested, refreshing instance for {url}")
+                instance = await pool.force_refresh_instance(instance)
+                warm_start = False
+            else:
+                logger.info(f"{_get_thread_info()} Force fresh instance requested, creating new instance for {url}")
+                instance = await pool.create_instance()
+                warm_start = False
+        # Handle auto-refresh based on analysis count (if refresh_interval > 0)
+        elif instance is not None and instance.should_refresh(pool.refresh_interval):
+            logger.info(f"{_get_thread_info()} Auto-refresh triggered for instance (analyses: {instance.analyses_since_refresh}/{pool.refresh_interval}) for {url}")
+            instance = await pool.force_refresh_instance(instance)
+            warm_start = False
         
         analysis_start_time = time.time()
         last_successful_step = None
@@ -1854,6 +1928,9 @@ async def _run_analysis_once_async(url: str, timeout: int, force_retry: bool, po
             
             instance.record_analysis(page_load_time)
             
+            if DEBUG_MODE:
+                logger.debug(f"{_get_thread_info()} Instance PID {instance.pid} completed analysis #{instance.analyses_since_refresh} (total: {instance.total_analyses})")
+            
             browser_startup_time = instance.startup_time if not warm_start else 0.0
             metrics_collector.record_playwright_metrics(
                 page_load_time=page_load_time,
@@ -1965,6 +2042,8 @@ def get_pool_stats() -> Dict:
         'busy_instances': 0,
         'total_warm_starts': 0,
         'total_cold_starts': 0,
+        'total_refreshes': 0,
+        'refresh_interval': _refresh_interval,
         'avg_startup_time': 0.0,
         'instances': []
     }
@@ -1974,6 +2053,49 @@ def get_event_loop_health() -> Dict:
     """Get event loop health status"""
     event_loop_thread = _get_event_loop_thread()
     return event_loop_thread.get_health_status()
+
+
+async def _force_refresh_all_instances_async(pool: PlaywrightPool) -> int:
+    """
+    Force refresh all instances in the pool (internal async function).
+    
+    Returns:
+        Number of instances refreshed
+    """
+    logger = get_logger()
+    logger.info(f"{_get_thread_info()} Force refreshing all instances in pool")
+    
+    async with pool.lock:
+        instances_to_refresh = [i for i in pool.instances if i.is_alive()]
+    
+    refresh_count = 0
+    for instance in instances_to_refresh:
+        try:
+            await pool.force_refresh_instance(instance)
+            refresh_count += 1
+        except Exception as e:
+            logger.error(f"{_get_thread_info()} Failed to refresh instance PID {instance.pid}: {e}")
+    
+    logger.info(f"{_get_thread_info()} Refreshed {refresh_count} instances")
+    return refresh_count
+
+
+def force_refresh_all_instances() -> int:
+    """
+    Force refresh all browser instances in the pool.
+    Useful for debugging or manual maintenance.
+    
+    Returns:
+        Number of instances refreshed
+    """
+    event_loop_thread = _get_event_loop_thread()
+    if event_loop_thread.loop and event_loop_thread._pool:
+        future = asyncio.run_coroutine_threadsafe(
+            _force_refresh_all_instances_async(event_loop_thread._pool),
+            event_loop_thread.loop
+        )
+        return future.result(timeout=30.0)
+    return 0
 
 
 def diagnose_threading_issues() -> Dict:
