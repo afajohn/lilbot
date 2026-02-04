@@ -26,7 +26,6 @@ class MetricsCollector:
         self._cache_misses = 0
         
         self._api_calls_sheets = 0
-        self._api_calls_cypress = 0
         
         self._processing_times: List[float] = []
         
@@ -135,11 +134,6 @@ class MetricsCollector:
         """Record Google Sheets API call(s)"""
         with self._lock:
             self._api_calls_sheets += count
-    
-    def record_api_call_cypress(self, count: int = 1):
-        """Record Cypress/PageSpeed API call(s)"""
-        with self._lock:
-            self._api_calls_cypress += count
     
     def record_playwright_metrics(
         self,
@@ -371,8 +365,7 @@ class MetricsCollector:
                 'cache_misses': self._cache_misses,
                 'cache_hit_ratio_percent': cache_hit_ratio,
                 'api_calls_sheets': self._api_calls_sheets,
-                'api_calls_cypress': self._api_calls_cypress,
-                'total_api_calls': self._api_calls_sheets + self._api_calls_cypress,
+                'total_api_calls': self._api_calls_sheets,
                 'avg_processing_time_seconds': avg_processing_time,
                 'failure_reasons': dict(self._failure_reasons),
                 'alert_triggered': self._alert_triggered,
@@ -455,7 +448,6 @@ class MetricsCollector:
         lines.append("# HELP psi_audit_api_calls_total Total API calls")
         lines.append("# TYPE psi_audit_api_calls_total counter")
         lines.append(f"psi_audit_api_calls_total{{api=\"sheets\"}} {metrics['api_calls_sheets']}")
-        lines.append(f"psi_audit_api_calls_total{{api=\"cypress\"}} {metrics['api_calls_cypress']}")
         lines.append("")
         
         lines.append("# HELP psi_audit_processing_time_seconds Average processing time per URL")
@@ -601,7 +593,6 @@ class MetricsCollector:
             self._cache_hits = 0
             self._cache_misses = 0
             self._api_calls_sheets = 0
-            self._api_calls_cypress = 0
             self._processing_times.clear()
             self._failure_reasons.clear()
             self._url_results.clear()

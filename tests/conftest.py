@@ -42,34 +42,6 @@ def sample_urls():
 
 
 @pytest.fixture
-def sample_cypress_result():
-    return {
-        'mobile': {
-            'score': 85,
-            'reportUrl': None
-        },
-        'desktop': {
-            'score': 90,
-            'reportUrl': None
-        }
-    }
-
-
-@pytest.fixture
-def sample_cypress_result_failing():
-    return {
-        'mobile': {
-            'score': 65,
-            'reportUrl': 'https://pagespeed.web.dev/mobile-report'
-        },
-        'desktop': {
-            'score': 70,
-            'reportUrl': 'https://pagespeed.web.dev/desktop-report'
-        }
-    }
-
-
-@pytest.fixture
 def temp_service_account_file(tmp_path):
     service_account_data = {
         "type": "service_account",

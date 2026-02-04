@@ -28,22 +28,13 @@ def check_module_installed(module_name):
         print(f"✗ Python module NOT installed: {module_name}")
         return False
 
-def check_npm_package():
+def check_playwright_installed():
     try:
-        result = subprocess.run(
-            ['npm', 'list', 'cypress'],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if 'cypress@' in result.stdout:
-            print(f"✓ NPM package installed: cypress")
-            return True
-        else:
-            print(f"✗ NPM package NOT installed: cypress")
-            return False
-    except Exception as e:
-        print(f"✗ Error checking NPM packages: {e}")
+        import playwright
+        print(f"✓ Python package installed: playwright")
+        return True
+    except ImportError:
+        print(f"✗ Python package NOT installed: playwright")
         return False
 
 def main():
@@ -132,10 +123,10 @@ def main():
             checks_passed += 1
     print()
     
-    print("7. Checking Node.js Dependencies...")
+    print("7. Checking Playwright...")
     print("-" * 70)
     checks_total += 1
-    if check_npm_package():
+    if check_playwright_installed():
         checks_passed += 1
     print()
     

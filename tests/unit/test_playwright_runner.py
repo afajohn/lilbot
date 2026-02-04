@@ -57,7 +57,6 @@ def mock_metrics_collector():
     collector = Mock()
     collector.record_cache_hit = Mock()
     collector.record_cache_miss = Mock()
-    collector.record_api_call_cypress = Mock()
     collector.record_playwright_metrics = Mock()
     
     with patch('tools.metrics.metrics_collector.get_metrics_collector', return_value=collector):
@@ -608,7 +607,6 @@ class TestMetricsCollection:
         
         mock_metrics.increment_total_operations.assert_called_once()
         mock_metrics.record_success.assert_called_once()
-        mock_metrics_collector.record_api_call_cypress.assert_called()
     
     def test_metrics_recorded_on_failure(
         self, mock_playwright_available, mock_cache_manager, mock_metrics,
