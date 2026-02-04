@@ -440,7 +440,7 @@ class TestPlaywrightPool:
             with patch.object(instance, 'get_memory_usage', return_value=2048):
                 await pool.return_instance(instance, success=True)
             
-            assert instance not in pool.instances
+            assert pool.instance is None
         
         asyncio.run(run_test())
     
@@ -456,7 +456,7 @@ class TestPlaywrightPool:
             await pool.return_instance(instance, success=False)
             await pool.return_instance(instance, success=False)
             
-            assert instance not in pool.instances
+            assert pool.instance is None
         
         asyncio.run(run_test())
     
@@ -467,11 +467,10 @@ class TestPlaywrightPool:
             await pool.initialize()
             
             instance1 = await pool.create_instance()
-            instance2 = await pool.create_instance()
             
             await pool.shutdown()
             
-            assert len(pool.instances) == 0
+            assert pool.instance is None
         
         asyncio.run(run_test())
 

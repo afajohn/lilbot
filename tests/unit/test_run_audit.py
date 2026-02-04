@@ -2,7 +2,6 @@ import pytest
 import sys
 import os
 from unittest.mock import Mock, patch, MagicMock
-import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
@@ -25,7 +24,7 @@ class TestProcessUrlScoreThreshold:
         }
         
         url_data = (5, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': threading.Lock()}
+        current_idx = 1
         mock_service = Mock()
         
         result = run_audit.process_url(
@@ -35,7 +34,7 @@ class TestProcessUrlScoreThreshold:
             mock_service,
             600,
             1,
-            processed_count,
+            current_idx,
             skip_cache=False
         )
         
@@ -65,7 +64,7 @@ class TestProcessUrlScoreThreshold:
         }
         
         url_data = (5, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': threading.Lock()}
+        current_idx = 1
         mock_service = Mock()
         
         result = run_audit.process_url(
@@ -75,7 +74,7 @@ class TestProcessUrlScoreThreshold:
             mock_service,
             600,
             1,
-            processed_count,
+            current_idx,
             skip_cache=False
         )
         
@@ -103,7 +102,7 @@ class TestProcessUrlScoreThreshold:
         }
         
         url_data = (5, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': threading.Lock()}
+        current_idx = 1
         mock_service = Mock()
         
         result = run_audit.process_url(
@@ -113,7 +112,7 @@ class TestProcessUrlScoreThreshold:
             mock_service,
             600,
             1,
-            processed_count,
+            current_idx,
             skip_cache=False
         )
         
@@ -141,7 +140,7 @@ class TestProcessUrlScoreThreshold:
         }
         
         url_data = (5, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': threading.Lock()}
+        current_idx = 1
         mock_service = Mock()
         
         result = run_audit.process_url(
@@ -151,7 +150,7 @@ class TestProcessUrlScoreThreshold:
             mock_service,
             600,
             1,
-            processed_count,
+            current_idx,
             skip_cache=False
         )
         
@@ -177,7 +176,7 @@ class TestProcessUrlScoreThreshold:
         }
         
         url_data = (5, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': threading.Lock()}
+        current_idx = 1
         mock_service = Mock()
         
         result = run_audit.process_url(
@@ -187,7 +186,7 @@ class TestProcessUrlScoreThreshold:
             mock_service,
             600,
             1,
-            processed_count,
+            current_idx,
             skip_cache=False
         )
         
@@ -213,7 +212,7 @@ class TestProcessUrlScoreThreshold:
         }
         
         url_data = (5, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': threading.Lock()}
+        current_idx = 1
         mock_service = Mock()
         
         result = run_audit.process_url(
@@ -223,7 +222,7 @@ class TestProcessUrlScoreThreshold:
             mock_service,
             600,
             1,
-            processed_count,
+            current_idx,
             skip_cache=False
         )
         
@@ -249,7 +248,7 @@ class TestProcessUrlScoreThreshold:
         }
         
         url_data = (5, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': threading.Lock()}
+        current_idx = 1
         mock_service = Mock()
         
         result = run_audit.process_url(
@@ -259,7 +258,7 @@ class TestProcessUrlScoreThreshold:
             mock_service,
             600,
             1,
-            processed_count,
+            current_idx,
             skip_cache=False
         )
         
@@ -285,7 +284,7 @@ class TestProcessUrlScoreThreshold:
         }
         
         url_data = (5, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': threading.Lock()}
+        current_idx = 1
         mock_service = Mock()
         
         result = run_audit.process_url(
@@ -295,7 +294,7 @@ class TestProcessUrlScoreThreshold:
             mock_service,
             600,
             1,
-            processed_count,
+            current_idx,
             skip_cache=False
         )
         
@@ -321,7 +320,7 @@ class TestProcessUrlScoreThreshold:
         }
         
         url_data = (5, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': threading.Lock()}
+        current_idx = 1
         mock_service = Mock()
         
         result = run_audit.process_url(
@@ -331,7 +330,7 @@ class TestProcessUrlScoreThreshold:
             mock_service,
             600,
             1,
-            processed_count,
+            current_idx,
             skip_cache=False
         )
         
@@ -353,7 +352,7 @@ class TestProcessUrlScoreThreshold:
         }
         
         url_data = (5, 'https://example.com', 'https://existing.mobile.psi', None, False)
-        processed_count = {'count': 0, 'lock': threading.Lock()}
+        current_idx = 1
         mock_service = Mock()
         
         result = run_audit.process_url(
@@ -363,7 +362,7 @@ class TestProcessUrlScoreThreshold:
             mock_service,
             600,
             1,
-            processed_count,
+            current_idx,
             skip_cache=False
         )
         
@@ -389,7 +388,7 @@ class TestProcessUrlScoreThreshold:
         }
         
         url_data = (5, 'https://example.com', None, 'https://existing.desktop.psi', False)
-        processed_count = {'count': 0, 'lock': threading.Lock()}
+        current_idx = 1
         mock_service = Mock()
         
         result = run_audit.process_url(
@@ -399,7 +398,7 @@ class TestProcessUrlScoreThreshold:
             mock_service,
             600,
             1,
-            processed_count,
+            current_idx,
             skip_cache=False
         )
         
@@ -419,3 +418,4 @@ class TestScoreThresholdConstant:
     def test_score_threshold_is_80(self):
         """Verify that the score threshold is set to 80"""
         assert run_audit.SCORE_THRESHOLD == 80
+

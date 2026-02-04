@@ -3,12 +3,10 @@ import argparse
 import sys
 import os
 import signal
-import threading
 import traceback
 import re
+import time
 from typing import List, Tuple, Dict, Any, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
 
@@ -36,18 +34,16 @@ SERVICE_ACCOUNT_FILE = 'service-account.json'
 MOBILE_COLUMN = 'F'
 DESKTOP_COLUMN = 'G'
 SCORE_THRESHOLD = 80
-DEFAULT_CONCURRENCY = 3
 
 
-shutdown_event = threading.Event()
-log_lock = threading.Lock()
+shutdown_requested = False
 
 
 def signal_handler(signum, frame):
-    with log_lock:
-        log = logger.get_logger()
-        log.info("\nReceived shutdown signal. Waiting for current tasks to complete...")
-    shutdown_event.set()
+    global shutdown_requested
+    log = logger.get_logger()
+    log.info("\nReceived shutdown signal. Stopping after current URL...")
+    shutdown_requested = True
 
 
 def process_url(
@@ -57,14 +53,13 @@ def process_url(
     service,
     timeout: int,
     total_urls: int,
-    processed_count: dict,
+    current_idx: int,
     skip_cache: bool = False,
     url_filter: Optional[URLFilter] = None,
     dry_run: bool = False,
     url_validator: Optional[URLValidator] = None,
     validate_dns: bool = True,
     validate_redirects: bool = True,
-    progress_bar: Optional[tqdm] = None,
     force_retry: bool = False
 ) -> Dict[str, Any]:
     log = logger.get_logger()
@@ -74,7 +69,7 @@ def process_url(
     
     start_time = metrics_collector.record_url_start()
     
-    if shutdown_event.is_set():
+    if shutdown_requested:
         return {
             'row': row_index,
             'url': url,
@@ -82,18 +77,9 @@ def process_url(
             'shutdown': True
         }
     
-    with processed_count['lock']:
-        processed_count['count'] += 1
-        current_idx = processed_count['count']
-    
     if should_skip:
-        if progress_bar:
-            progress_bar.set_description(f"Skipping (row {row_index})")
-            progress_bar.update(1)
-        else:
-            with log_lock:
-                log.info(f"[{current_idx}/{total_urls}] Skipping {url} (contains 'passed' or has green background in column F or G)")
-                log.info("")
+        log.info(f"[{current_idx}/{total_urls}] Skipping {url} (contains 'passed' or has green background in column F or G)")
+        log.info("")
         metrics_collector.record_url_skipped()
         return {
             'row': row_index,
@@ -102,13 +88,8 @@ def process_url(
         }
     
     if existing_mobile_psi and existing_desktop_psi:
-        if progress_bar:
-            progress_bar.set_description(f"Skipping (row {row_index})")
-            progress_bar.update(1)
-        else:
-            with log_lock:
-                log.info(f"[{current_idx}/{total_urls}] Skipping {url} (both columns F and G already filled)")
-                log.info("")
+        log.info(f"[{current_idx}/{total_urls}] Skipping {url} (both columns F and G already filled)")
+        log.info("")
         metrics_collector.record_url_skipped()
         return {
             'row': row_index,
@@ -119,13 +100,8 @@ def process_url(
     try:
         sanitized_url = URLFilter.sanitize_url(url)
     except ValueError as e:
-        if progress_bar:
-            progress_bar.set_description(f"Invalid URL (row {row_index})")
-            progress_bar.update(1)
-        else:
-            with log_lock:
-                log.error(f"[{current_idx}/{total_urls}] Invalid URL {url}: {e}")
-                log.info("")
+        log.error(f"[{current_idx}/{total_urls}] Invalid URL {url}: {e}")
+        log.info("")
         metrics_collector.record_url_failure(start_time, reason='invalid_url')
         return {
             'row': row_index,
@@ -143,16 +119,11 @@ def process_url(
         
         if not is_valid:
             error_msg = "; ".join(validation_results['errors'])
-            if progress_bar:
-                progress_bar.set_description(f"Validation failed (row {row_index})")
-                progress_bar.update(1)
-            else:
-                with log_lock:
-                    log.error(f"[{current_idx}/{total_urls}] URL validation failed for {sanitized_url}")
-                    log.error(f"  Errors: {error_msg}")
-                    if validation_results.get('redirect_count'):
-                        log.error(f"  Redirect count: {validation_results['redirect_count']}")
-                    log.info("")
+            log.error(f"[{current_idx}/{total_urls}] URL validation failed for {sanitized_url}")
+            log.error(f"  Errors: {error_msg}")
+            if validation_results.get('redirect_count'):
+                log.error(f"  Redirect count: {validation_results['redirect_count']}")
+            log.info("")
             metrics_collector.record_url_failure(start_time, reason='validation_failed')
             return {
                 'row': row_index,
@@ -163,30 +134,19 @@ def process_url(
             }
         
         if validation_results.get('redirect_count') and validation_results['redirect_count'] > 0:
-            if not progress_bar:
-                with log_lock:
-                    log.warning(f"  URL has {validation_results['redirect_count']} redirect(s)")
+            log.warning(f"  URL has {validation_results['redirect_count']} redirect(s)")
     
     try:
         normalized_url = URLNormalizer.normalize_url(sanitized_url)
         if normalized_url != sanitized_url:
-            if not progress_bar:
-                with log_lock:
-                    log.info(f"  Normalized URL: {normalized_url}")
+            log.info(f"  Normalized URL: {normalized_url}")
             sanitized_url = normalized_url
     except Exception as e:
-        if not progress_bar:
-            with log_lock:
-                log.warning(f"  Could not normalize URL: {e}")
+        log.warning(f"  Could not normalize URL: {e}")
     
     if url_filter and not url_filter.is_allowed(sanitized_url):
-        if progress_bar:
-            progress_bar.set_description(f"Filtered (row {row_index})")
-            progress_bar.update(1)
-        else:
-            with log_lock:
-                log.info(f"[{current_idx}/{total_urls}] URL rejected by filter: {sanitized_url}")
-                log.info("")
+        log.info(f"[{current_idx}/{total_urls}] URL rejected by filter: {sanitized_url}")
+        log.info("")
         metrics_collector.record_url_skipped()
         return {
             'row': row_index,
@@ -195,27 +155,19 @@ def process_url(
             'reason': 'filtered'
         }
     
-    if progress_bar:
-        progress_bar.set_description(f"Analyzing {sanitized_url[:50]}...")
-    else:
-        with log_lock:
-            log.info(f"[{current_idx}/{total_urls}] Analyzing {sanitized_url}...")
-            if dry_run:
-                log.info(f"  [DRY RUN MODE] - No changes will be made")
-            if existing_mobile_psi:
-                log.info(f"  Mobile PSI URL already exists (column F filled), will only update desktop")
-            if existing_desktop_psi:
-                log.info(f"  Desktop PSI URL already exists (column G filled), will only update mobile")
-            if skip_cache:
-                log.info(f"  Cache disabled for this analysis")
+    log.info(f"[{current_idx}/{total_urls}] Analyzing {sanitized_url}...")
+    if dry_run:
+        log.info(f"  [DRY RUN MODE] - No changes will be made")
+    if existing_mobile_psi:
+        log.info(f"  Mobile PSI URL already exists (column F filled), will only update desktop")
+    if existing_desktop_psi:
+        log.info(f"  Desktop PSI URL already exists (column G filled), will only update mobile")
+    if skip_cache:
+        log.info(f"  Cache disabled for this analysis")
     
     if dry_run:
-        if progress_bar:
-            progress_bar.update(1)
-        else:
-            with log_lock:
-                log.info(f"  [DRY RUN] Would analyze {sanitized_url}")
-                log.info("")
+        log.info(f"  [DRY RUN] Would analyze {sanitized_url}")
+        log.info("")
         return {
             'row': row_index,
             'url': url,
@@ -233,10 +185,8 @@ def process_url(
         mobile_status = "PASS" if mobile_score is not None and mobile_score >= SCORE_THRESHOLD else "FAIL"
         desktop_status = "PASS" if desktop_score is not None and desktop_score >= SCORE_THRESHOLD else "FAIL"
         
-        if not progress_bar:
-            with log_lock:
-                log.info(f"  Mobile: {mobile_score if mobile_score is not None else 'N/A'} ({mobile_status})")
-                log.info(f"  Desktop: {desktop_score if desktop_score is not None else 'N/A'} ({desktop_status})")
+        log.info(f"  Mobile: {mobile_score if mobile_score is not None else 'N/A'} ({mobile_status})")
+        log.info(f"  Desktop: {desktop_score if desktop_score is not None else 'N/A'} ({desktop_status})")
         
         updates = []
         
@@ -263,18 +213,14 @@ def process_url(
                     service=service,
                     dry_run=dry_run
                 )
-                if not progress_bar:
-                    with log_lock:
-                        log.info(f"  Updated spreadsheet with {len(updates)} value(s)")
+                log.info(f"  Updated spreadsheet with {len(updates)} value(s)")
             except PermanentError as e:
-                if not progress_bar:
-                    with log_lock:
-                        logger.log_error_with_context(
-                            log,
-                            f"  PERMANENT ERROR: Failed to update spreadsheet: {e}",
-                            exception=e,
-                            context={'url': url, 'row': row_index}
-                        )
+                logger.log_error_with_context(
+                    log,
+                    f"  PERMANENT ERROR: Failed to update spreadsheet: {e}",
+                    exception=e,
+                    context={'url': url, 'row': row_index}
+                )
                 metrics.record_error(
                     error_type='PermanentError',
                     function_name='batch_write_psi_urls',
@@ -283,14 +229,12 @@ def process_url(
                     traceback=traceback.format_exc()
                 )
             except Exception as e:
-                if not progress_bar:
-                    with log_lock:
-                        logger.log_error_with_context(
-                            log,
-                            f"  WARNING: Failed to update spreadsheet: {e}",
-                            exception=e,
-                            context={'url': url, 'row': row_index}
-                        )
+                logger.log_error_with_context(
+                    log,
+                    f"  WARNING: Failed to update spreadsheet: {e}",
+                    exception=e,
+                    context={'url': url, 'row': row_index}
+                )
                 metrics.record_error(
                     error_type=type(e).__name__,
                     function_name='batch_write_psi_urls',
@@ -299,15 +243,14 @@ def process_url(
                     traceback=traceback.format_exc()
                 )
         
-        if progress_bar:
-            progress_bar.update(1)
-        else:
-            with log_lock:
-                log.info(f"Successfully analyzed {url}")
-                log.info("")
+        log.info(f"Successfully analyzed {url}")
+        log.info("")
         
         from_cache = result.get('_from_cache', False)
         metrics_collector.record_url_success(start_time, from_cache=from_cache)
+        
+        if not from_cache:
+            metrics_collector.record_sequential_url_processed()
         
         return {
             'row': row_index,
@@ -322,19 +265,14 @@ def process_url(
     except playwright_runner.PlaywrightAnalysisTimeoutError as e:
         error_msg = f"Timeout - {e}"
         short_error = f"ERROR: Analysis timeout ({timeout}s)"
-        if progress_bar:
-            progress_bar.set_description(f"Timeout (row {row_index})")
-            progress_bar.update(1)
-        else:
-            with log_lock:
-                logger.log_error_with_context(
-                    log,
-                    f"  ERROR: {error_msg}",
-                    exception=e,
-                    context={'url': url, 'row': row_index, 'timeout': timeout}
-                )
-                log.error(f"Failed to analyze {url} due to timeout", exc_info=True)
-                log.info("")
+        logger.log_error_with_context(
+            log,
+            f"  ERROR: {error_msg}",
+            exception=e,
+            context={'url': url, 'row': row_index, 'timeout': timeout}
+        )
+        log.error(f"Failed to analyze {url} due to timeout", exc_info=True)
+        log.info("")
         metrics.record_error(
             error_type='PlaywrightAnalysisTimeoutError',
             function_name='process_url',
@@ -359,13 +297,9 @@ def process_url(
                     service=service,
                     dry_run=dry_run
                 )
-                if not progress_bar:
-                    with log_lock:
-                        log.info(f"  Wrote error indicator to spreadsheet")
+                log.info(f"  Wrote error indicator to spreadsheet")
             except Exception as write_error:
-                if not progress_bar:
-                    with log_lock:
-                        log.error(f"  Failed to write error indicator: {write_error}")
+                log.error(f"  Failed to write error indicator: {write_error}")
         
         return {
             'row': row_index,
@@ -378,19 +312,14 @@ def process_url(
     except playwright_runner.PlaywrightRunnerError as e:
         error_msg = f"Playwright failed - {e}"
         short_error = f"ERROR: Playwright failed"
-        if progress_bar:
-            progress_bar.set_description(f"Playwright error (row {row_index})")
-            progress_bar.update(1)
-        else:
-            with log_lock:
-                logger.log_error_with_context(
-                    log,
-                    f"  ERROR: {error_msg}",
-                    exception=e,
-                    context={'url': url, 'row': row_index}
-                )
-                log.error(f"Failed to analyze {url} due to Playwright error", exc_info=True)
-                log.info("")
+        logger.log_error_with_context(
+            log,
+            f"  ERROR: {error_msg}",
+            exception=e,
+            context={'url': url, 'row': row_index}
+        )
+        log.error(f"Failed to analyze {url} due to Playwright error", exc_info=True)
+        log.info("")
         metrics.record_error(
             error_type='PlaywrightRunnerError',
             function_name='process_url',
@@ -415,13 +344,9 @@ def process_url(
                     service=service,
                     dry_run=dry_run
                 )
-                if not progress_bar:
-                    with log_lock:
-                        log.info(f"  Wrote error indicator to spreadsheet")
+                log.info(f"  Wrote error indicator to spreadsheet")
             except Exception as write_error:
-                if not progress_bar:
-                    with log_lock:
-                        log.error(f"  Failed to write error indicator: {write_error}")
+                log.error(f"  Failed to write error indicator: {write_error}")
         
         return {
             'row': row_index,
@@ -434,19 +359,14 @@ def process_url(
     except PermanentError as e:
         error_msg = f"Permanent error - {e}"
         short_error = f"ERROR: Permanent error"
-        if progress_bar:
-            progress_bar.set_description(f"Permanent error (row {row_index})")
-            progress_bar.update(1)
-        else:
-            with log_lock:
-                logger.log_error_with_context(
-                    log,
-                    f"  PERMANENT ERROR: {error_msg}",
-                    exception=e,
-                    context={'url': url, 'row': row_index}
-                )
-                log.error(f"Failed to analyze {url} due to permanent error", exc_info=True)
-                log.info("")
+        logger.log_error_with_context(
+            log,
+            f"  PERMANENT ERROR: {error_msg}",
+            exception=e,
+            context={'url': url, 'row': row_index}
+        )
+        log.error(f"Failed to analyze {url} due to permanent error", exc_info=True)
+        log.info("")
         metrics.record_error(
             error_type='PermanentError',
             function_name='process_url',
@@ -471,13 +391,9 @@ def process_url(
                     service=service,
                     dry_run=dry_run
                 )
-                if not progress_bar:
-                    with log_lock:
-                        log.info(f"  Wrote error indicator to spreadsheet")
+                log.info(f"  Wrote error indicator to spreadsheet")
             except Exception as write_error:
-                if not progress_bar:
-                    with log_lock:
-                        log.error(f"  Failed to write error indicator: {write_error}")
+                log.error(f"  Failed to write error indicator: {write_error}")
         
         return {
             'row': row_index,
@@ -490,19 +406,14 @@ def process_url(
     except RetryableError as e:
         error_msg = f"Retryable error - {e}"
         short_error = f"ERROR: Retryable error"
-        if progress_bar:
-            progress_bar.set_description(f"Retryable error (row {row_index})")
-            progress_bar.update(1)
-        else:
-            with log_lock:
-                logger.log_error_with_context(
-                    log,
-                    f"  RETRYABLE ERROR: {error_msg}",
-                    exception=e,
-                    context={'url': url, 'row': row_index}
-                )
-                log.error(f"Failed to analyze {url} due to retryable error", exc_info=True)
-                log.info("")
+        logger.log_error_with_context(
+            log,
+            f"  RETRYABLE ERROR: {error_msg}",
+            exception=e,
+            context={'url': url, 'row': row_index}
+        )
+        log.error(f"Failed to analyze {url} due to retryable error", exc_info=True)
+        log.info("")
         metrics.record_error(
             error_type='RetryableError',
             function_name='process_url',
@@ -527,13 +438,9 @@ def process_url(
                     service=service,
                     dry_run=dry_run
                 )
-                if not progress_bar:
-                    with log_lock:
-                        log.info(f"  Wrote error indicator to spreadsheet")
+                log.info(f"  Wrote error indicator to spreadsheet")
             except Exception as write_error:
-                if not progress_bar:
-                    with log_lock:
-                        log.error(f"  Failed to write error indicator: {write_error}")
+                log.error(f"  Failed to write error indicator: {write_error}")
         
         return {
             'row': row_index,
@@ -546,19 +453,14 @@ def process_url(
     except Exception as e:
         error_msg = f"Unexpected error - {e}"
         short_error = f"ERROR: Unexpected error"
-        if progress_bar:
-            progress_bar.set_description(f"Unexpected error (row {row_index})")
-            progress_bar.update(1)
-        else:
-            with log_lock:
-                logger.log_error_with_context(
-                    log,
-                    f"  ERROR: {error_msg}",
-                    exception=e,
-                    context={'url': url, 'row': row_index}
-                )
-                log.error(f"Failed to analyze {url} due to unexpected error", exc_info=True)
-                log.info("")
+        logger.log_error_with_context(
+            log,
+            f"  ERROR: {error_msg}",
+            exception=e,
+            context={'url': url, 'row': row_index}
+        )
+        log.error(f"Failed to analyze {url} due to unexpected error", exc_info=True)
+        log.info("")
         metrics.record_error(
             error_type=type(e).__name__,
             function_name='process_url',
@@ -583,13 +485,9 @@ def process_url(
                     service=service,
                     dry_run=dry_run
                 )
-                if not progress_bar:
-                    with log_lock:
-                        log.info(f"  Wrote error indicator to spreadsheet")
+                log.info(f"  Wrote error indicator to spreadsheet")
             except Exception as write_error:
-                if not progress_bar:
-                    with log_lock:
-                        log.error(f"  Failed to write error indicator: {write_error}")
+                log.error(f"  Failed to write error indicator: {write_error}")
         
         return {
             'row': row_index,
@@ -629,12 +527,6 @@ def main():
         type=int,
         default=None,
         help='Timeout in seconds for each Cypress run (default: 600)'
-    )
-    parser.add_argument(
-        '--concurrency',
-        type=int,
-        default=None,
-        help=f'Number of concurrent workers (default: {DEFAULT_CONCURRENCY}, range: 1-5)'
     )
     parser.add_argument(
         '--skip-cache',
@@ -714,11 +606,6 @@ def main():
         help='Path to YAML configuration file'
     )
     parser.add_argument(
-        '--no-progress-bar',
-        action='store_true',
-        help='Disable progress bar (useful for logging)'
-    )
-    parser.add_argument(
         '--force-retry',
         action='store_true',
         help='Bypass circuit breaker and force retries during critical runs'
@@ -727,6 +614,18 @@ def main():
         '--debug-mode',
         action='store_true',
         help='Enable debug mode with verbose Playwright logging, screenshots, and HTML capture on errors'
+    )
+    parser.add_argument(
+        '--url-delay',
+        type=int,
+        default=5,
+        help='Inter-URL delay in seconds (default: 5, range: 0-60)'
+    )
+    parser.add_argument(
+        '--refresh-interval',
+        type=int,
+        default=10,
+        help='Browser instance refresh interval in number of analyses (default: 10, 0 to disable auto-refresh)'
     )
     
     args = parser.parse_args()
@@ -748,19 +647,21 @@ def main():
         args.service_account = SERVICE_ACCOUNT_FILE
     if args.timeout is None:
         args.timeout = 600
-    if args.concurrency is None:
-        args.concurrency = DEFAULT_CONCURRENCY
     if args.dns_timeout is None:
         args.dns_timeout = 5.0
     if args.redirect_timeout is None:
         args.redirect_timeout = 10.0
     
-    if not args.tab:
-        print("Error: --tab is required (or specify in config file)")
+    if args.url_delay < 0 or args.url_delay > 60:
+        print("Error: --url-delay must be between 0 and 60 seconds")
         sys.exit(1)
     
-    if args.concurrency < 1 or args.concurrency > 5:
-        print("Error: --concurrency must be between 1 and 5")
+    if args.refresh_interval < 0:
+        print("Error: --refresh-interval must be >= 0")
+        sys.exit(1)
+    
+    if not args.tab:
+        print("Error: --tab is required (or specify in config file)")
         sys.exit(1)
     
     if args.filter:
@@ -777,6 +678,8 @@ def main():
     
     log = logger.setup_logger()
     metrics = get_global_metrics()
+    
+    playwright_runner.set_refresh_interval(args.refresh_interval)
     
     if args.debug_mode:
         playwright_runner.set_debug_mode(True)
@@ -964,7 +867,6 @@ def main():
         sys.exit(0)
     
     log.info(f"Found {len(urls)} URLs to analyze.")
-    log.info(f"Using {args.concurrency} concurrent workers.")
     if args.skip_cache:
         log.info("Cache is disabled (--skip-cache flag)")
     if args.dry_run:
@@ -973,6 +875,10 @@ def main():
         log.info("FORCE RETRY MODE: Circuit breaker will be bypassed")
     if args.debug_mode:
         log.info("DEBUG MODE: Screenshots and HTML capture enabled on errors")
+    if args.refresh_interval > 0:
+        log.info(f"Browser instance auto-refresh: every {args.refresh_interval} analyse{'s' if args.refresh_interval != 1 else ''}")
+    else:
+        log.info("Browser instance auto-refresh: disabled")
     if args.whitelist:
         log.info(f"URL whitelist: {args.whitelist}")
     if args.blacklist:
@@ -985,106 +891,67 @@ def main():
         log.info(f"Resuming from row: {args.resume_from_row}")
     if url_filter_pattern:
         log.info(f"URL filter pattern: {args.filter}")
+    if args.url_delay > 0:
+        log.info(f"Inter-URL delay: {args.url_delay} second{'s' if args.url_delay != 1 else ''}")
     log.info("")
     
-    processed_count = {'count': 0, 'lock': threading.Lock()}
+    metrics_collector = get_metrics_collector()
+    metrics_collector.start_sequential_processing()
+    
     results = []
     
-    progress_bar = None
-    if not args.no_progress_bar:
-        progress_bar = tqdm(total=len(urls), desc="Processing URLs", unit="url", 
-                           disable=False, ncols=100, leave=True)
-    
-    with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-        futures = {
-            executor.submit(
-                process_url,
+    try:
+        for idx, url_data in enumerate(urls, start=1):
+            if shutdown_requested:
+                log.info("Shutdown requested. Stopping...")
+                break
+            
+            result = process_url(
                 url_data,
                 args.spreadsheet_id,
                 args.tab,
                 service,
                 args.timeout,
                 len(urls),
-                processed_count,
+                idx,
                 args.skip_cache,
                 url_filter,
                 args.dry_run,
                 url_validator,
                 validate_dns,
                 validate_redirects,
-                progress_bar,
                 args.force_retry
-            ): url_data for url_data in urls
-        }
-        
-        try:
-            for future in as_completed(futures):
-                if shutdown_event.is_set():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    log.info("Shutdown requested. Cancelling remaining tasks...")
-                    break
+            )
+            results.append(result)
+            
+            # Apply inter-URL delay (skip for first URL and skipped URLs)
+            if args.url_delay > 0 and idx < len(urls):
+                # Skip delay if this was the first URL
+                is_first_url = (idx == 1)
+                # Skip delay if URL was skipped (has 'skipped' key set to True)
+                was_skipped = result.get('skipped', False)
                 
-                try:
-                    result = future.result()
-                    results.append(result)
-                except Exception as e:
-                    url_data = futures[future]
-                    with log_lock:
-                        logger.log_error_with_context(
-                            log,
-                            f"Unexpected error processing {url_data[1]}: {e}",
-                            exception=e,
-                            context={'url': url_data[1], 'row': url_data[0]}
-                        )
-                    metrics.record_error(
-                        error_type=type(e).__name__,
-                        function_name='process_url',
-                        error_message=str(e),
-                        is_retryable=False,
-                        traceback=traceback.format_exc()
-                    )
-                    
-                    row_index = url_data[0]
-                    url = url_data[1]
-                    short_error = f"ERROR: Unexpected error"
-                    
-                    try:
-                        existing_mobile_psi = url_data[2] if len(url_data) > 2 else None
-                        existing_desktop_psi = url_data[3] if len(url_data) > 3 else None
-                        
-                        updates = []
-                        if not existing_mobile_psi:
-                            updates.append((row_index, MOBILE_COLUMN, short_error))
-                        if not existing_desktop_psi:
-                            updates.append((row_index, DESKTOP_COLUMN, short_error))
-                        
-                        if updates and not args.dry_run:
-                            sheets_client.batch_write_psi_urls(
-                                args.spreadsheet_id,
-                                args.tab,
-                                updates,
-                                service=service,
-                                dry_run=False
-                            )
-                            log.info(f"  Wrote error indicator to spreadsheet for row {row_index}")
-                    except Exception as write_error:
-                        log.error(f"  Failed to write error indicator for row {row_index}: {write_error}")
-                    
-                    results.append({
-                        'row': row_index,
-                        'url': url,
-                        'error': str(e),
-                        'error_type': 'unexpected',
-                        'failed': True
-                    })
-        except KeyboardInterrupt:
-            executor.shutdown(wait=False, cancel_futures=True)
-            log.info("Keyboard interrupt received. Shutting down...")
-        finally:
-            if progress_bar:
-                progress_bar.close()
+                if not is_first_url and not was_skipped:
+                    delay_start = time.time()
+                    log.info(f"Waiting {args.url_delay} second{'s' if args.url_delay != 1 else ''} before next URL...")
+                    time.sleep(args.url_delay)
+                    actual_delay = time.time() - delay_start
+                    metrics_collector.record_inter_url_delay(actual_delay)
+            
+            # Print sequential processing stats every 10 URLs
+            if idx % 10 == 0 and idx > 0:
+                seq_stats = metrics_collector.get_sequential_processing_stats()
+                if seq_stats['active']:
+                    urls_remaining = len(urls) - idx
+                    if seq_stats['urls_per_minute'] > 0:
+                        estimated_minutes = urls_remaining / seq_stats['urls_per_minute']
+                        log.info(f"Sequential processing: {seq_stats['urls_per_minute']:.2f} URLs/min, estimated {estimated_minutes:.1f} minutes remaining")
+                    else:
+                        log.info(f"Sequential processing: calculating rate...")
+    except KeyboardInterrupt:
+        log.info("Keyboard interrupt received. Shutting down...")
     
-    if shutdown_event.is_set():
+    if shutdown_requested:
         log.info("\nAudit interrupted by user. Partial results below.\n")
     
     log.info("=" * 80)
@@ -1154,6 +1021,22 @@ def main():
         log.info(f"ERROR indicators written to cells for {failed_analyses} failed analyses.")
     
     log.info("=" * 80)
+    
+    seq_stats = metrics_collector.get_sequential_processing_stats()
+    if seq_stats['active'] and seq_stats['urls_processed'] > 0:
+        log.info("")
+        log.info("=" * 80)
+        log.info("SEQUENTIAL PROCESSING STATISTICS")
+        log.info("=" * 80)
+        log.info(f"Total URLs processed: {seq_stats['urls_processed']}")
+        log.info(f"Total elapsed time: {seq_stats['elapsed_time_seconds'] / 60:.2f} minutes")
+        log.info(f"Processing rate: {seq_stats['urls_per_minute']:.2f} URLs per minute")
+        
+        inter_url_stats = metrics_collector.get_metrics()['inter_url_delays']
+        if inter_url_stats['count'] > 0:
+            log.info(f"Average inter-URL delay: {inter_url_stats['avg_delay_seconds']:.2f} seconds")
+            log.info(f"Total inter-URL delay time: {inter_url_stats['total_delay_seconds'] / 60:.2f} minutes")
+        log.info("=" * 80)
     
     if args.export_json:
         try:

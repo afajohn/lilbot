@@ -1,12 +1,13 @@
 # Agent Development Guide
 
 **Key Topics:**
-- [Threading and Concurrency](#threading-and-concurrency) - Single event loop thread architecture, why async Playwright is used
+- [Threading Architecture](#threading-architecture) - Single event loop thread architecture, why async Playwright is used
 - [Troubleshooting Greenlet Errors](#troubleshooting-greenlet-errors) - Complete guide to debugging threading issues
 - [Skip Logic](#skip-logic) - When URLs are skipped vs re-analyzed (with examples)
 - [Data Flow](#data-flow) - Complete workflow from input to output with cell value examples
-- [Performance Optimizations](#performance-optimizations) - Browser pooling, request blocking, concurrent processing
+- [Performance Characteristics](#performance-characteristics) - Sequential processing, browser lifecycle, reliability focus
 - [Error Handling and Recovery](#error-handling-and-recovery) - Debug mode, page reload logic, recovery strategies
+- [Troubleshooting Memory Issues](#troubleshooting-memory-issues) - Memory leak prevention and refresh interval tuning
 
 ## Commands
 
@@ -79,6 +80,19 @@ python run_audit.py --tab "TAB_NAME" --force-retry
 
 # Optional: Debug mode (verbose logging, screenshots, and HTML capture on errors)
 python run_audit.py --tab "TAB_NAME" --debug-mode
+
+# Optional: Configure browser instance refresh interval (default: 10 analyses)
+python run_audit.py --tab "TAB_NAME" --refresh-interval 20
+# Or disable auto-refresh (not recommended for large audits)
+python run_audit.py --tab "TAB_NAME" --refresh-interval 0
+
+# Optional: Add delay between URL processing (default: 0 seconds)
+python run_audit.py --tab "TAB_NAME" --url-delay 2
+# Useful for rate limiting, reducing system load, or avoiding detection
+# Recommended values: 1-3 seconds for gentle rate limiting, 5+ seconds for aggressive throttling
+
+# Example: Memory-constrained system with aggressive refresh and delay
+python run_audit.py --tab "TAB_NAME" --refresh-interval 5 --url-delay 1
 ```
 
 **Validate Service Account:**
@@ -214,11 +228,11 @@ All debug files are saved with format: `YYYYMMDD_HHMMSS_sanitized-url_reason.{pn
 - HTML: Complete page source at time of error
 - Organized in `debug_screenshots/` directory (gitignored)
 
-## Threading and Concurrency
+## Threading Architecture
 
 The system uses a dedicated event loop thread for all Playwright operations to ensure thread safety:
 
-### Threading Architecture
+### Single Event Loop Thread Design
 
 **Why Single Event Loop Thread?**
 
@@ -226,13 +240,13 @@ Playwright Python is built on async/await and requires all operations to run wit
 - **Ensure Thread Safety**: All Playwright operations (browser contexts, pages, async calls) execute on a single thread
 - **Enable Synchronous API**: Main thread can submit requests and receive results synchronously while Playwright runs asynchronously
 - **Prevent Greenlet Errors**: Avoid "greenlet.error: cannot switch to a different thread" by guaranteeing all async operations share the same event loop
-- **Support Concurrency**: Multiple requests can be queued and processed concurrently within the single event loop thread
+- **Sequential Processing**: URLs are processed one at a time to maximize reliability and avoid memory issues
 
 **Architecture Components:**
-- **Main Thread**: Handles application logic, submits analysis requests, processes results
+- **Main Thread**: Handles application logic, submits analysis requests sequentially, processes results
 - **Event Loop Thread**: Dedicated daemon thread running asyncio event loop for all Playwright operations
 - **Single-Thread Guarantee**: All browser contexts, pages, and async operations execute on the event loop thread
-- **Thread-Safe Queue**: Analysis requests are submitted via `asyncio.run_coroutine_threadsafe()` from main thread to event loop thread
+- **Sequential Execution**: Each URL is fully processed before starting the next one
 - **Future Objects**: Requests return `concurrent.futures.Future` objects that block main thread until event loop completes the async operation
 
 **Why Async Playwright Despite Synchronous API?**
@@ -240,9 +254,9 @@ Playwright Python is built on async/await and requires all operations to run wit
 Although `run_audit.py` appears to use a synchronous API (calling `run_analysis()` without `await`), Playwright internally uses async/await because:
 
 1. **Browser Automation is Inherently Asynchronous**: Network requests, page loads, DOM queries, and user interactions are I/O-bound operations that benefit from async execution
-2. **Performance**: Async allows multiple operations to run concurrently (e.g., multiple browser contexts analyzing different URLs simultaneously)
-3. **Non-Blocking**: The event loop can handle multiple page interactions without blocking other operations
-4. **Playwright Design**: The Playwright library is designed as async-first, with sync wrappers being secondary
+2. **Non-Blocking Internal Operations**: The event loop can handle internal Playwright operations efficiently without blocking
+3. **Playwright Design**: The Playwright library is designed as async-first, with sync wrappers being secondary
+4. **Sequential Reliability**: URLs are processed sequentially to avoid threading complexity and memory issues
 
 The system bridges the gap by:
 - Running async Playwright code on the dedicated event loop thread
@@ -339,14 +353,13 @@ Greenlet is a lightweight cooperative threading library used internally by Playw
 
 1. **Multi-Threaded Playwright Usage**: Creating browser contexts or pages from different threads
 2. **Mixed Event Loops**: Running Playwright operations across multiple asyncio event loops
-3. **Thread Pool Executor Issues**: Submitting Playwright async operations directly to ThreadPoolExecutor without proper event loop management
-
 **How the System Prevents Greenlet Errors:**
 
 1. **Dedicated Event Loop Thread**: All Playwright operations run on a single dedicated thread
 2. **Thread-Safe Submission**: Main thread submits requests via `asyncio.run_coroutine_threadsafe()` which properly schedules async operations on the event loop thread
-3. **Single Browser Pool**: All browser contexts and pages are created and managed within the event loop thread
-4. **Heartbeat Monitoring**: Event loop health checks ensure the loop is responsive and running on the correct thread
+3. **Single Browser Instance**: Browser contexts and pages are created and managed within the event loop thread
+4. **Sequential Processing**: URLs are processed one at a time, eliminating threading complexity
+5. **Heartbeat Monitoring**: Event loop health checks ensure the loop is responsive and running on the correct thread
 
 **If You Encounter Greenlet Errors:**
 
@@ -371,7 +384,7 @@ Greenlet is a lightweight cooperative threading library used internally by Playw
 
 4. **Common Fixes**:
    - Restart the application (event loop may be corrupted)
-   - Reduce concurrency: `--concurrency 1` to eliminate threading complexity
+   - System already uses sequential processing (no concurrency)
    - Check for event loop unresponsiveness (>30s since last heartbeat)
    - Review custom code modifications that may call Playwright from wrong thread
 
@@ -394,14 +407,36 @@ greenlet.error: cannot switch to a different thread
 ```
 
 **Prevention Best Practices:**
-- Never call Playwright operations directly from ThreadPoolExecutor
+- Never call Playwright operations directly from multiple threads
 - Always use `asyncio.run_coroutine_threadsafe()` to submit async Playwright operations from other threads
 - Keep all browser context and page creation within the event loop thread
 - Don't mix sync and async Playwright APIs
+- Use sequential processing (already implemented) to avoid threading issues
 
-## Performance Optimizations
+## Performance Characteristics
 
-The system has been comprehensively optimized for faster URL processing:
+The system prioritizes **reliability over speed** with sequential processing:
+
+### Sequential Processing Strategy
+
+**Architecture:**
+- URLs are processed one at a time (no concurrency, no parallel execution)
+- Each URL fully completes before the next one starts
+- Simple, predictable execution flow
+- Trades speed for reliability and memory efficiency
+
+**Expected Performance:**
+- ~10-15 minutes per URL (including PageSpeed Insights analysis time)
+- 4-6 URLs per hour depending on site complexity and network conditions
+- Slower than parallel approaches but significantly more reliable
+- No threading issues, race conditions, or resource contention
+- Predictable memory usage and resource consumption
+
+**When Sequential Processing is Ideal:**
+- Long-running audits where reliability matters more than speed
+- Memory-constrained systems (4-8GB RAM)
+- Environments where debugging and monitoring are priorities
+- Systems where stability is more important than throughput
 
 ### Core Optimizations
 1. **Result Caching**: Redis/file-based cache with 24-hour TTL and LRU eviction (1000 entries max)
@@ -414,13 +449,24 @@ The system has been comprehensively optimized for faster URL processing:
 
 ### Playwright-Specific Optimizations
 
-**Browser Instance Pooling (Up to 3 Concurrent Browsers)**:
-- Pool maintains up to 3 persistent browser contexts for parallel processing
-- Warm start instances reuse existing browser contexts for 2-3x faster execution
-- Cold start instances are created on-demand with optimized launch flags
-- Automatic memory monitoring with 1GB threshold per instance
-- Instances are auto-killed after 3 consecutive failures or high memory usage
-- Pool cleanup on application shutdown
+**Browser Instance Lifecycle Management**:
+- Single browser instance reused across URLs for efficiency
+- Auto-refresh: Browser instance is automatically refreshed every N analyses (default: 10)
+- Configurable via `--refresh-interval` flag (0 to disable auto-refresh, not recommended)
+- Refresh tracking: Instance tracks `analyses_since_refresh` counter
+- Refresh logging: All refresh events are logged with instance PID and analysis count
+- Refreshing releases memory and prevents memory leaks in long-running audits
+- Force refresh available via API when memory threshold (1GB) is exceeded
+
+**URL Processing Delay**:
+- Configurable delay between URL processing (default: 0 seconds)
+- Set via `--url-delay` flag to add pause between each URL
+- Useful for rate limiting, reducing system load, or avoiding detection
+- Recommended values:
+  - 0 seconds (default): Maximum speed, no artificial delays
+  - 1-3 seconds: Gentle rate limiting and system load reduction
+  - 5+ seconds: Aggressive throttling for heavily rate-limited scenarios
+- Example: `python run_audit.py --tab "TAB_NAME" --url-delay 2`
 
 **Network Request Interception & Resource Blocking**:
 - Automatically blocks unnecessary resources to speed up page loads:
@@ -431,18 +477,22 @@ The system has been comprehensively optimized for faster URL processing:
 - Typical blocking ratio: 40-60% of requests blocked
 - Reduces bandwidth usage and page load time by 30-50%
 
-**Parallel Browser Management**:
-- Default concurrency increased to 3 workers (up from 1)
-- Each worker can use a separate browser instance from the pool
-- ThreadPoolExecutor manages parallel URL processing
-- Configurable via `--concurrency` flag (1-5 workers supported)
+**Sequential URL Processing**:
+- URLs are processed one at a time in sequential order for maximum reliability
+- No concurrent processing, threading, or parallel execution
+- Simple, predictable execution flow
+- Easier to debug and monitor progress
+- Trades speed for reliability and memory efficiency
+- Expected performance: ~10-15 minutes per URL, 4-6 URLs per hour
+- Slower than parallel approaches but significantly more reliable
 
 **Performance Monitoring**:
 - Tracks page load time per URL analysis
 - Measures browser startup time for cold starts
-- Records memory usage per instance over time
-- Monitors warm/cold start ratio
+- Records memory usage over time
+- Monitors refresh frequency and timing
 - Collects resource blocking statistics (total vs blocked requests)
+- Tracks sequential processing throughput (URLs per hour)
 - All metrics exported to Prometheus and JSON formats
 
 **Additional Browser Optimizations**:
@@ -653,7 +703,7 @@ Use this table to quickly determine if a URL will be skipped or analyzed:
 - Handles errors (permissions, missing tabs, etc.)
 
 #### playwright_runner.py
-- Manages Playwright browser instances with advanced pooling
+- Manages single Playwright browser instance with refresh strategy
 - Runs PageSpeed Insights analysis with proper error handling
 - **Persistent Retry Logic**: Infinite retry with exponential backoff (5s-60s) for retryable errors until success or explicit timeout
 - **Smart Timeout Handling**: Distinguishes between analysis timeout (abort) vs selector timeout (retry with fresh page load)
@@ -666,15 +716,15 @@ Use this table to quickly determine if a URL will be skipped or analyzed:
 - **Page Diagnostics**: Extracts buttons, inputs, links, and their visibility status for debugging
 - Returns structured results with performance metrics
 - **Progressive Timeout**: Starts at 300s, increases to 600s after first failure
-- **Instance Pooling**: Maintains pool of up to 3 reusable browser contexts for warm starts
+- **Browser Instance Refresh**: Automatically refreshes browser every N analyses (configurable)
 - **Network Request Interception**: Blocks unnecessary resources (images, fonts, ads, analytics)
-- **Memory Monitoring**: Monitors browser memory usage and auto-restarts on >1GB
-- **Parallel Processing**: Supports up to 3 concurrent browser instances
+- **Memory Monitoring**: Monitors browser memory usage and auto-refreshes on >1GB
+- **Sequential Processing**: Processes URLs one at a time for maximum reliability
 - **Performance Tracking**: Records page load time, browser startup time, memory usage
-- **Resource Blocking Stats**: Tracks total vs blocked requests per instance
+- **Resource Blocking Stats**: Tracks total vs blocked requests
 - Runs Playwright in explicit headless mode with optimized launch flags
-- Pool cleanup via `shutdown_pool()` called on application exit
-- Pool statistics accessible via `get_pool_stats()` function
+- Browser cleanup via `shutdown()` called on application exit
+- Browser statistics accessible via `get_stats()` function
 
 #### logger.py
 - Sets up logging to both console and file
@@ -883,7 +933,8 @@ Example `config.yaml`:
 ```yaml
 tab: "Production URLs"
 timeout: 600
-concurrency: 3
+refresh-interval: 10
+url-delay: 1
 export-json: "results.json"
 export-csv: "results.csv"
 resume-from-row: 50
@@ -893,7 +944,7 @@ filter: "https://example\\.com/.*"
 CLI arguments override config file values, so you can use the config for defaults and override specific options:
 
 ```bash
-python run_audit.py --config config.yaml --concurrency 5
+python run_audit.py --config config.yaml --url-delay 2
 ```
 
 ### Progress Bar
@@ -1225,12 +1276,145 @@ cat metrics.prom
 
 For detailed metrics documentation, see `METRICS_GUIDE.md` and `METRICS_QUICK_REFERENCE.md`.
 
+## Troubleshooting Memory Issues
+
+### Symptoms of Memory Issues
+
+**Browser memory leaks** can manifest as:
+- Browser process memory steadily increasing over time
+- Analysis becoming slower after processing many URLs
+- Browser crashes with "Out of memory" errors
+- System becoming unresponsive during long audits
+- Error messages about memory limits exceeded
+
+### Prevention and Solutions
+
+**1. Browser Instance Refresh (Primary Solution)**
+
+The automatic refresh mechanism prevents memory leaks:
+- Browser instance refreshed every N analyses to release memory
+- Default interval: 10 analyses
+- Adjust based on available system memory and audit size
+
+**Tuning Refresh Interval:**
+
+```bash
+# For memory-constrained systems (4GB RAM or less)
+python run_audit.py --tab "TAB_NAME" --refresh-interval 3
+
+# For medium memory systems (8GB RAM)
+python run_audit.py --tab "TAB_NAME" --refresh-interval 5
+
+# For high memory systems (16GB+ RAM)
+python run_audit.py --tab "TAB_NAME" --refresh-interval 10
+
+# For very large audits (>500 URLs)
+python run_audit.py --tab "TAB_NAME" --refresh-interval 3
+```
+
+**How Refresh Works:**
+- Browser instance is cleanly shut down after N analyses
+- New browser instance created for next URL
+- Memory is released back to operating system
+- No impact on audit results or accuracy
+- Minimal performance impact (1-2 seconds per refresh)
+
+**2. Monitor Memory Usage**
+
+Check memory during audit:
+
+**Windows (PowerShell):**
+```powershell
+# Monitor Python process memory
+Get-Process python | Select-Object WorkingSet64
+```
+
+**Linux/Mac:**
+```bash
+# Monitor Python and Chromium processes
+ps aux | grep -E 'python|chromium'
+```
+
+**3. Signs You Need More Frequent Refresh**
+
+Reduce `--refresh-interval` if you see:
+- Browser memory >1GB (system auto-refreshes at this threshold)
+- Frequent "Memory limit exceeded" errors
+- Analysis becoming progressively slower
+- System swap usage increasing
+- Browser crashes during analysis
+
+**4. Memory Threshold Auto-Refresh**
+
+The system automatically refreshes the browser when:
+- Browser memory usage exceeds 1GB
+- This happens **in addition to** the interval-based refresh
+- Logged as "Memory threshold exceeded" in debug output
+
+**5. Disable Auto-Refresh (Not Recommended)**
+
+To disable automatic refresh:
+```bash
+python run_audit.py --tab "TAB_NAME" --refresh-interval 0
+```
+
+**WARNING**: Only disable for small audits (<20 URLs). Long audits will likely encounter memory issues.
+
+**6. System Requirements**
+
+**Minimum:**
+- 4GB RAM (use `--refresh-interval 3`)
+- 10GB free disk space
+
+**Recommended:**
+- 8GB RAM (use `--refresh-interval 5-10`)
+- 20GB free disk space
+
+**Optimal:**
+- 16GB+ RAM (use default `--refresh-interval 10`)
+- 50GB+ free disk space
+
+**7. Troubleshooting Commands**
+
+```bash
+# Check current browser memory usage
+python get_pool_stats.py
+
+# Run with aggressive refresh for memory-constrained systems
+python run_audit.py --tab "TAB_NAME" --refresh-interval 3
+
+# Run with debug mode to track memory over time
+python run_audit.py --tab "TAB_NAME" --debug-mode --refresh-interval 5
+```
+
+**8. Long-Running Audit Best Practices**
+
+For audits with 200+ URLs:
+- Use `--refresh-interval 5` or lower
+- Enable debug mode to monitor progress: `--debug-mode`
+- Run during off-hours to avoid system resource competition
+- Consider splitting into multiple smaller batches
+- Monitor system memory during first few URLs to verify stability
+
+**9. Emergency Memory Recovery**
+
+If the system becomes unresponsive:
+1. Stop the audit (Ctrl+C)
+2. Kill remaining browser processes:
+   - Windows: `taskkill /F /IM chromium.exe`
+   - Linux/Mac: `pkill chromium`
+3. Wait 30 seconds for memory to be released
+4. Resume audit with lower `--refresh-interval`
+
 ## Limitations
 
-- Rate limits: Google Sheets API has quotas (100 requests per 100 seconds per user)
-- PageSpeed Insights may rate-limit high-volume usage
-- Playwright requires browser binaries to be installed via `playwright install chromium`
-- Windows encoding issues are mitigated but may still occur with exotic characters
-- URLs must be in column A starting at row 2
-- Results always written to columns F and G (not configurable via CLI)
-- Dashboard requires plotly library for chart generation
+- **Sequential processing**: URLs processed one at a time, linear scaling (slower than parallel but more reliable)
+- **Performance**: ~10-15 minutes per URL, 4-6 URLs per hour depending on site complexity
+- **Rate limits**: Google Sheets API has quotas (100 requests per 100 seconds per user)
+- **PageSpeed Insights**: May rate-limit high-volume usage
+- **Memory**: Long audits require periodic browser refresh to prevent memory leaks (automatic with `--refresh-interval`)
+- **Playwright**: Requires browser binaries to be installed via `playwright install chromium`
+- **Windows encoding**: Issues are mitigated but may still occur with exotic characters
+- **URLs**: Must be in column A starting at row 2
+- **Results**: Always written to columns F and G (not configurable via CLI)
+- **Dashboard**: Requires plotly library for chart generation

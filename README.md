@@ -24,15 +24,24 @@ Automated tool for running PageSpeed Insights audits on URLs from Google Sheets 
 
 This tool reads URLs from a Google Spreadsheet, analyzes each URL using PageSpeed Insights (via Playwright automation), and writes PageSpeed report URLs back to the spreadsheet for URLs with scores below 80.
 
-### ⚡ Performance Optimizations (v2.0)
+### ⚡ Performance Characteristics
 
-**Processing Speed Improved by ~40%**:
+**Sequential Processing for Maximum Reliability**:
+- URLs are processed one at a time (no concurrent processing)
+- Predictable execution flow and easy to debug
+- No threading issues, race conditions, or resource contention
+- Trades speed for reliability and memory efficiency
+- Expected: ~10-15 minutes per URL, 4-6 URLs per hour
+- Slower than parallel approaches but significantly more reliable
+
+**Optimizations Within Sequential Processing**:
 - Reduced default timeout from 900s to 600s
 - Optimized Playwright wait times (from 5-15s to 2s between actions)
 - Reduced retry attempts (Playwright: 5→2, Python: 10→3)
-- Incremental spreadsheet updates (see results immediately, not after all URLs complete)
+- Incremental spreadsheet updates (see results immediately)
 - Explicit headless mode execution
-- Instance pooling for browser context reuse
+- Browser instance refresh to prevent memory leaks
+- Configurable delays between URLs for rate limiting
 
 **Key Features:**
 - ✅ Batch process URLs from Google Sheets
@@ -42,7 +51,9 @@ This tool reads URLs from a Google Spreadsheet, analyzes each URL using PageSpee
 - ✅ Automatic retry on transient failures
 - ✅ Comprehensive logging
 - ✅ Windows Unicode encoding fix
-- ✅ Optimized for faster processing (~10 minutes per URL instead of 15+)
+- ✅ Sequential processing for reliability (~10-15 minutes per URL)
+- ✅ Configurable browser refresh interval to prevent memory leaks
+- ✅ Optional delays between URLs for rate limiting
 - ✅ **Security hardening: service account validation, rate limiting, URL filtering, audit trail**
 - ✅ **Dry run mode for safe testing**
 
@@ -135,7 +146,8 @@ python run_audit.py --tab "Barranquilla Singles" --service-account "service-acco
 | `--spreadsheet-id` | No | `1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I` | Google Spreadsheet ID |
 | `--service-account` | No | `service-account.json` | Path to service account JSON file |
 | `--timeout` | No | `600` | Timeout in seconds for each URL analysis (recommend 900-1200 for production) |
-| `--concurrency` | No | `3` | Number of concurrent workers (1-5) |
+| `--refresh-interval` | No | `10` | Browser refresh interval (number of URLs before restarting browser) |
+| `--url-delay` | No | `0` | Delay in seconds between processing each URL (for rate limiting) |
 | `--skip-cache` | No | `False` | Skip cache and force fresh analysis |
 | `--whitelist` | No | - | URL whitelist patterns (space-separated) |
 | `--blacklist` | No | - | URL blacklist patterns (space-separated) |
@@ -177,9 +189,16 @@ python run_audit.py --tab "Website 1" --timeout 1200
 python run_audit.py --tab "Website 1" --skip-cache
 ```
 
-**Use multiple concurrent workers:**
+**Configure browser refresh and URL delay:**
 ```bash
-python run_audit.py --tab "Website 1" --concurrency 5
+# Refresh browser every 5 URLs (good for memory-constrained systems)
+python run_audit.py --tab "Website 1" --refresh-interval 5
+
+# Add 2-second delay between URLs (for rate limiting)
+python run_audit.py --tab "Website 1" --url-delay 2
+
+# Combined: aggressive refresh and delay
+python run_audit.py --tab "Website 1" --refresh-interval 5 --url-delay 1
 ```
 
 **Filter URLs with whitelist/blacklist:**
@@ -521,11 +540,17 @@ Main Thread                          Event Loop Thread
                                      4. Set Future result
 <-- Return results
 6. Process results
+7. Optional delay (--url-delay)
+8. Submit next URL request           (Repeat for next URL)
 ```
 
 **Why This Prevents Greenlet Errors:**
 
 All Playwright operations (browser contexts, pages, async calls) execute on the same thread, preventing "greenlet.error: cannot switch to a different thread" errors that occur when async operations try to switch between threads.
+
+**Sequential Processing:**
+
+URLs are processed one at a time, with each URL fully completed before the next one starts. This eliminates threading complexity and ensures predictable, reliable execution. Optional delays between URLs can be configured via `--url-delay` for rate limiting.
 
 For detailed threading diagnostics, see the **Troubleshooting** section below.
 
@@ -629,12 +654,13 @@ playwright install chromium --force
 
 ### Error: Page crashed or browser context exceeded memory limit
 
-**Cause**: Browser instance consumed too much memory (>1GB) or experienced failures.
+**Cause**: Browser instance consumed too much memory (>1GB) or experienced failures during long-running audits.
 
 **Solution**:
-- The tool automatically monitors memory and restarts browser contexts
+- The tool automatically monitors memory and refreshes the browser instance
 - This is expected behavior and should resolve automatically
-- If persistent, try reducing `--concurrency` to limit parallel browsers
+- If persistent, use more aggressive refresh: `--refresh-interval 5` or `--refresh-interval 3`
+- See the **Memory Issues and Browser Refresh** section below for detailed guidance
 
 ### PageSpeed Insights Selector Issues
 
@@ -734,7 +760,7 @@ The system uses a dedicated event loop thread architecture where:
 
 3. **Common Fixes**:
    - **Restart the application**: Event loop may be corrupted
-   - **Reduce concurrency**: Use `--concurrency 1` to eliminate threading complexity
+   - **System uses sequential processing**: No concurrent execution, should not have threading issues
    - **Check event loop health**: Verify event loop thread is responsive
    - **Review custom modifications**: Ensure you haven't added code that calls Playwright from wrong thread
 
@@ -754,10 +780,11 @@ greenlet.error: cannot switch to a different thread
 ```
 
 **Prevention Best Practices:**
-- Never call Playwright operations directly from ThreadPoolExecutor
+- System uses sequential processing (no concurrent execution)
 - Always use the provided `run_analysis()` function which handles threading correctly
 - Don't modify Playwright code to use sync APIs
 - Keep all browser context and page creation within the event loop thread
+- Never call Playwright operations from custom threads
 
 **Diagnostic Tools:**
 
@@ -783,6 +810,90 @@ python diagnose_playwright_threading.py --pool-only
 - Click Share
 - Find the service account email
 - Change permission to "Editor"
+
+### Memory Issues and Browser Refresh
+
+**Symptoms of Memory Issues:**
+
+Browser memory leaks can manifest as:
+- Browser process memory steadily increasing over time
+- Analysis becoming slower after processing many URLs
+- Browser crashes with "Out of memory" errors
+- System becoming unresponsive during long audits
+- Error messages about memory limits exceeded
+
+**Browser Refresh Strategy:**
+
+The tool automatically refreshes the browser instance every N URLs to prevent memory leaks:
+
+```bash
+# Default: refresh every 10 URLs
+python run_audit.py --tab "TAB_NAME"
+
+# For memory-constrained systems (4GB RAM or less): refresh every 3 URLs
+python run_audit.py --tab "TAB_NAME" --refresh-interval 3
+
+# For medium memory systems (8GB RAM): refresh every 5 URLs
+python run_audit.py --tab "TAB_NAME" --refresh-interval 5
+
+# For high memory systems (16GB+ RAM): use default or increase to 20
+python run_audit.py --tab "TAB_NAME" --refresh-interval 20
+
+# Disable auto-refresh (NOT RECOMMENDED for audits >20 URLs)
+python run_audit.py --tab "TAB_NAME" --refresh-interval 0
+```
+
+**How Refresh Works:**
+- Browser instance is cleanly shut down after N analyses
+- New browser instance created for next URL
+- Memory is released back to operating system
+- No impact on audit results or accuracy
+- Minimal performance impact (1-2 seconds per refresh)
+
+**Memory Threshold Auto-Refresh:**
+
+In addition to interval-based refresh, the system automatically refreshes when:
+- Browser memory usage exceeds 1GB
+- Logged as "Memory threshold exceeded" in debug output
+- Happens regardless of `--refresh-interval` setting
+
+**System Requirements:**
+
+| System Memory | Recommended Refresh Interval | Notes |
+|--------------|------------------------------|-------|
+| 4GB RAM | `--refresh-interval 3` | Aggressive refresh for limited memory |
+| 8GB RAM | `--refresh-interval 5-10` | Balanced performance and reliability |
+| 16GB+ RAM | `--refresh-interval 10-20` | Default or higher for best performance |
+
+**Long-Running Audit Best Practices (200+ URLs):**
+- Use `--refresh-interval 5` or lower
+- Enable debug mode to monitor: `--debug-mode`
+- Run during off-hours to avoid resource competition
+- Monitor system memory during first few URLs
+- Consider splitting into smaller batches if system struggles
+
+**Emergency Memory Recovery:**
+
+If the system becomes unresponsive:
+1. Stop the audit (Ctrl+C)
+2. Kill remaining browser processes:
+   - Windows: `taskkill /F /IM chromium.exe`
+   - Linux/Mac: `pkill chromium`
+3. Wait 30 seconds for memory to be released
+4. Resume audit with lower `--refresh-interval`
+
+**Monitoring Memory Usage:**
+
+```bash
+# Windows (PowerShell)
+Get-Process python | Select-Object WorkingSet64
+
+# Linux/Mac
+ps aux | grep -E 'python|chromium'
+
+# Check browser memory via tool
+python get_pool_stats.py
+```
 
 ## Configuration
 
@@ -917,11 +1028,14 @@ done
 
 ## Limitations
 
-- Requires active internet connection
-- PageSpeed Insights rate limits may apply for high-volume usage
-- Analysis time depends on website complexity and server response time (typically 5-10 minutes per URL after optimizations)
-- Browser automation depends on PageSpeed Insights UI structure (may need updates if Google changes their interface)
-- URLs must start from row 2 (row 1 is treated as header)
+- **Sequential Processing**: URLs processed one at a time, linear scaling (slower than parallel but more reliable)
+- **Performance**: ~10-15 minutes per URL, 4-6 URLs per hour depending on site complexity
+- **Internet Connection**: Requires active internet connection
+- **PageSpeed Insights**: Rate limits may apply for high-volume usage
+- **Memory**: Long audits require periodic browser refresh to prevent memory leaks (automatic)
+- **Browser Automation**: Depends on PageSpeed Insights UI structure (may need updates if Google changes their interface)
+- **URLs**: Must be in column A starting from row 2 (row 1 is treated as header)
+- **Results**: Always written to columns F and G (not configurable via CLI)
 
 ## Support
 

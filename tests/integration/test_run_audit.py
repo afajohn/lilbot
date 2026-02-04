@@ -21,7 +21,7 @@ class TestProcessUrl:
         }
         
         url_data = (2, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -30,7 +30,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert result['mobile_score'] == 85
@@ -55,7 +55,7 @@ class TestProcessUrl:
         }
         
         url_data = (2, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -64,7 +64,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert result['mobile_score'] == 65
@@ -88,7 +88,7 @@ class TestProcessUrl:
         }
         
         url_data = (2, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -97,7 +97,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert result['mobile_score'] == 79
@@ -121,7 +121,7 @@ class TestProcessUrl:
         }
         
         url_data = (2, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -130,7 +130,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert result['mobile_score'] == 80
@@ -154,7 +154,7 @@ class TestProcessUrl:
         }
         
         url_data = (2, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -163,7 +163,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert result['mobile_score'] == 81
@@ -187,7 +187,7 @@ class TestProcessUrl:
         }
         
         url_data = (2, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -196,7 +196,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert result['mobile_score'] == 85
@@ -220,7 +220,7 @@ class TestProcessUrl:
         }
         
         url_data = (2, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -229,7 +229,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert result['mobile_score'] == 70
@@ -252,7 +252,7 @@ class TestProcessUrl:
         }
         
         url_data = (2, 'https://example.com', 'https://existing.mobile', None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -261,7 +261,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         mock_batch_write.assert_called_once()
@@ -272,7 +272,7 @@ class TestProcessUrl:
     
     def test_process_url_should_skip(self, mock_google_service):
         url_data = (2, 'https://example.com', None, None, True)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -281,7 +281,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert result['skipped'] is True
@@ -289,7 +289,7 @@ class TestProcessUrl:
     
     def test_process_url_both_columns_filled(self, mock_google_service):
         url_data = (2, 'https://example.com', 'https://psi.mobile', 'https://psi.desktop', False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -298,7 +298,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert result['skipped'] is True
@@ -309,7 +309,7 @@ class TestProcessUrl:
         mock_run_analysis.side_effect = PlaywrightAnalysisTimeoutError("Timeout after 600 seconds")
         
         url_data = (2, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -318,7 +318,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert 'error' in result
@@ -330,7 +330,7 @@ class TestProcessUrl:
         mock_run_analysis.side_effect = PlaywrightRunnerError("Playwright failed")
         
         url_data = (2, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -339,7 +339,7 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert 'error' in result
@@ -350,7 +350,7 @@ class TestProcessUrl:
         mock_run_analysis.side_effect = Exception("Unexpected error")
         
         url_data = (2, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
         result = run_audit.process_url(
             url_data,
@@ -359,17 +359,17 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert 'error' in result
         assert 'Unexpected error' in result['error']
     
-    def test_process_url_shutdown_event(self, mock_google_service):
+    def test_process_url_shutdown_requested(self, mock_google_service):
         url_data = (2, 'https://example.com', None, None, False)
-        processed_count = {'count': 0, 'lock': __import__('threading').Lock()}
+        current_idx = 1
         
-        run_audit.shutdown_event.set()
+        run_audit.shutdown_requested = True
         
         result = run_audit.process_url(
             url_data,
@@ -378,13 +378,13 @@ class TestProcessUrl:
             mock_google_service,
             600,
             1,
-            processed_count
+            current_idx
         )
         
         assert result['skipped'] is True
         assert result.get('shutdown') is True
         
-        run_audit.shutdown_event.clear()
+        run_audit.shutdown_requested = False
 
 
 class TestMainFunction:
@@ -465,17 +465,6 @@ class TestMainFunction:
         assert exc_info.value.code == 0
         assert any("No URLs found" in str(call) for call in mock_log.info.call_args_list)
     
-    @patch('sys.argv', ['run_audit.py', '--tab', 'TestTab', '--concurrency', '10'])
-    @patch('utils.logger.setup_logger')
-    def test_main_invalid_concurrency(self, mock_logger):
-        mock_log = Mock()
-        mock_logger.return_value = mock_log
-        
-        with pytest.raises(SystemExit) as exc_info:
-            run_audit.main()
-        
-        assert exc_info.value.code == 1
-    
     @patch('sys.argv', ['run_audit.py', '--tab', 'TestTab', '--timeout', '1200'])
     @patch('os.path.exists', return_value=True)
     @patch('sheets.sheets_client.authenticate')
@@ -506,8 +495,8 @@ class TestMainFunction:
 
 
 class TestSignalHandler:
-    def test_signal_handler_sets_shutdown_event(self):
-        run_audit.shutdown_event.clear()
+    def test_signal_handler_sets_shutdown_requested(self):
+        run_audit.shutdown_requested = False
         
         with patch('utils.logger.get_logger') as mock_get_logger:
             mock_log = Mock()
@@ -515,9 +504,9 @@ class TestSignalHandler:
             
             run_audit.signal_handler(None, None)
         
-        assert run_audit.shutdown_event.is_set()
+        assert run_audit.shutdown_requested is True
         
-        run_audit.shutdown_event.clear()
+        run_audit.shutdown_requested = False
 
 
 class TestConstants:
@@ -527,4 +516,3 @@ class TestConstants:
         assert run_audit.MOBILE_COLUMN == 'F'
         assert run_audit.DESKTOP_COLUMN == 'G'
         assert run_audit.SCORE_THRESHOLD == 80
-        assert run_audit.DEFAULT_CONCURRENCY == 3
