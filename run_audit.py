@@ -5,6 +5,7 @@ import os
 import signal
 import traceback
 import re
+import time
 from typing import List, Tuple, Dict, Any, Optional
 from tqdm import tqdm
 
@@ -684,6 +685,12 @@ def main():
         action='store_true',
         help='Enable debug mode with verbose Playwright logging, screenshots, and HTML capture on errors'
     )
+    parser.add_argument(
+        '--url-delay',
+        type=int,
+        default=5,
+        help='Inter-URL delay in seconds (default: 5, range: 0-60)'
+    )
     
     args = parser.parse_args()
     
@@ -708,6 +715,10 @@ def main():
         args.dns_timeout = 5.0
     if args.redirect_timeout is None:
         args.redirect_timeout = 10.0
+    
+    if args.url_delay < 0 or args.url_delay > 60:
+        print("Error: --url-delay must be between 0 and 60 seconds")
+        sys.exit(1)
     
     if not args.tab:
         print("Error: --tab is required (or specify in config file)")
@@ -934,6 +945,8 @@ def main():
         log.info(f"Resuming from row: {args.resume_from_row}")
     if url_filter_pattern:
         log.info(f"URL filter pattern: {args.filter}")
+    if args.url_delay > 0:
+        log.info(f"Inter-URL delay: {args.url_delay} second{'s' if args.url_delay != 1 else ''}")
     log.info("")
     
     results = []
@@ -967,6 +980,18 @@ def main():
                 args.force_retry
             )
             results.append(result)
+            
+            # Apply inter-URL delay (skip for first URL and skipped URLs)
+            if args.url_delay > 0 and idx < len(urls):
+                # Skip delay if this was the first URL
+                is_first_url = (idx == 1)
+                # Skip delay if URL was skipped (has 'skipped' key set to True)
+                was_skipped = result.get('skipped', False)
+                
+                if not is_first_url and not was_skipped:
+                    if not progress_bar:
+                        log.info(f"Waiting {args.url_delay} second{'s' if args.url_delay != 1 else ''} before next URL...")
+                    time.sleep(args.url_delay)
     except KeyboardInterrupt:
         log.info("Keyboard interrupt received. Shutting down...")
     finally:
