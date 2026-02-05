@@ -28,11 +28,36 @@ async def analyze_url(page: Page, url: str) -> dict:
     Raises:
         Exception: If analysis fails
     """
-    # Navigate to PageSpeed Insights
-    await page.goto('https://pagespeed.web.dev/', wait_until='domcontentloaded', timeout=30000)
+    # Navigate to PageSpeed Insights with extended timeout
+    await page.goto('https://pagespeed.web.dev/', wait_until='networkidle', timeout=60000)
+    
+    # Wait 2 seconds after page load before interacting
+    await asyncio.sleep(2)
+    
+    # Expanded input selectors
+    input_selectors = [
+        'input[type="url"]',
+        'input[name="url"]',
+        'input[placeholder*="URL"]',
+        '#i4',
+        '[data-url-input]',
+        'input[aria-label*="Enter"]'
+    ]
+    
+    # Wait for URL input to be visible
+    url_input = None
+    for selector in input_selectors:
+        try:
+            await page.wait_for_selector(selector, state='visible', timeout=10000)
+            url_input = page.locator(selector).first
+            break
+        except Exception:
+            continue
+    
+    if not url_input:
+        raise Exception("Failed to find URL input field")
     
     # Enter URL
-    url_input = page.locator('input[type="url"], input[name="url"], input[placeholder*="URL"]').first
     await url_input.fill(url)
     await asyncio.sleep(0.5)
     
