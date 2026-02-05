@@ -97,10 +97,11 @@ def main():
     parser.add_argument('--tab', help='Spreadsheet tab name')
     parser.add_argument('--service-account', default=SERVICE_ACCOUNT_FILE, help=f'Service account JSON file (default: {SERVICE_ACCOUNT_FILE})')
     parser.add_argument('--spreadsheet-id', default=DEFAULT_SPREADSHEET_ID, help=f'Spreadsheet ID (default: {DEFAULT_SPREADSHEET_ID})')
-    parser.add_argument('--concurrency', type=int, default=15, help='Parallel workers (default: 15)')
+    parser.add_argument('--concurrency', type=int, default=5, help='Parallel workers (default: 5)')
     parser.add_argument('--timeout', type=int, default=180, help='Timeout per URL in seconds (default: 180)')
     parser.add_argument('--initial-wait', type=int, default=30, help='Initial wait before polling for scores in seconds (default: 30)')
     parser.add_argument('--poll-timeout', type=int, default=120, help='Maximum time to poll for scores in seconds (default: 120)')
+    parser.add_argument('--urls-per-context', type=int, default=10, help='Number of URLs to process per browser context before recycling (default: 10)')
     parser.add_argument('--sequential', action='store_true', help='Process URLs one at a time (sets concurrency=1)')
     parser.add_argument('--url', help='Test a single URL directly without spreadsheet')
     
@@ -206,7 +207,8 @@ def main():
             urls_to_process, 
             concurrency=args.concurrency,
             initial_wait=args.initial_wait,
-            poll_timeout=args.poll_timeout
+            poll_timeout=args.poll_timeout,
+            urls_per_context=args.urls_per_context
         ))
     except Exception as e:
         logger.error(f"Analysis failed: {e}")

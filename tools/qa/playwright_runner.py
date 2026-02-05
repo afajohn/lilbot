@@ -296,15 +296,16 @@ async def analyze_url_with_retry(page: Page, context: BrowserContext, url: str, 
     raise Exception(f"Failed to analyze {url} after {max_retries} attempts")
 
 
-async def run_batch(urls: List[str], concurrency: int = 15, initial_wait: int = 30, poll_timeout: int = 120) -> List[dict]:
+async def run_batch(urls: List[str], concurrency: int = 15, initial_wait: int = 30, poll_timeout: int = 120, urls_per_context: int = 10) -> List[dict]:
     """
-    Process multiple URLs in parallel with shared browser and multiple contexts.
+    Process multiple URLs in parallel with shared browser and context recycling.
     
     Args:
         urls: List of URLs to analyze
         concurrency: Maximum number of concurrent analyses (default: 15)
         initial_wait: Initial wait time before polling for scores (default: 30)
         poll_timeout: Maximum time to poll for scores (default: 120)
+        urls_per_context: Number of URLs to process per context before recycling (default: 10)
         
     Returns:
         List of result dictionaries (one per URL)
@@ -349,6 +350,42 @@ async def run_batch(urls: List[str], concurrency: int = 15, initial_wait: int = 
                     except Exception:
                         pass
     
+    async def process_with_context_recycling(urls_batch: List[str], browser):
+        """Process a batch of URLs with context recycling."""
+        results = []
+        context = None
+        
+        try:
+            context = await browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            )
+            page = await context.new_page()
+            
+            for url in urls_batch:
+                async with semaphore:
+                    try:
+                        result = await analyze_url(page, url, initial_wait=initial_wait, poll_timeout=poll_timeout)
+                        result['url'] = url
+                        result['error'] = None
+                        results.append(result)
+                    except Exception as e:
+                        results.append({
+                            'url': url,
+                            'mobile_score': None,
+                            'desktop_score': None,
+                            'psi_url': None,
+                            'error': str(e)
+                        })
+        finally:
+            if context:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+        
+        return results
+    
     # Start Playwright and create shared browser
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
@@ -362,11 +399,20 @@ async def run_batch(urls: List[str], concurrency: int = 15, initial_wait: int = 
         )
         
         try:
-            # Process all URLs in parallel with concurrency control
-            results = await asyncio.gather(
-                *[analyze_with_semaphore(url, playwright, browser) for url in urls],
+            # Split URLs into batches for context recycling
+            url_batches = [urls[i:i + urls_per_context] for i in range(0, len(urls), urls_per_context)]
+            
+            # Process batches in parallel
+            batch_results = await asyncio.gather(
+                *[process_with_context_recycling(batch, browser) for batch in url_batches],
                 return_exceptions=False
             )
+            
+            # Flatten results
+            results = []
+            for batch_result in batch_results:
+                results.extend(batch_result)
+            
             return results
         finally:
             await browser.close()
