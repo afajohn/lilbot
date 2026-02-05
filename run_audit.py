@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
 
 from sheets import sheets_client
 from qa import playwright_runner
+from utils.logger import setup_logger
 
 DEFAULT_SPREADSHEET_ID = '1_7XyowAcqKRISdMp71DQUeKA_2O2g5T89tJvsVt685I'
 SERVICE_ACCOUNT_FILE = 'service-account.json'
@@ -21,40 +22,158 @@ DESKTOP_COLUMN = 'G'
 SCORE_THRESHOLD = 80
 
 
+async def analyze_single_url(url: str, timeout: int = 180, logger=None):
+    """
+    Analyze a single URL with retry support.
+    
+    Args:
+        url: URL to analyze
+        timeout: Timeout per URL in seconds (default: 180)
+        logger: Optional logger instance
+        
+    Returns:
+        Result dictionary with scores or error
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        raise Exception("Playwright is not installed. Install it with: pip install playwright && playwright install chromium")
+    
+    if logger:
+        logger.info(f"Analyzing URL: {url}")
+    
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--no-sandbox',
+                '--disable-setuid-sandbox'
+            ]
+        )
+        
+        try:
+            context = await browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            )
+            page = await context.new_page()
+            
+            # Use analyze_url_with_retry for full retry support
+            initial_wait = 30
+            poll_timeout = timeout - initial_wait - 10  # Reserve time for retries
+            if poll_timeout < 30:
+                poll_timeout = 30
+            
+            result = await playwright_runner.analyze_url_with_retry(
+                page, 
+                context, 
+                url, 
+                max_retries=3,
+                initial_wait=initial_wait,
+                poll_timeout=poll_timeout
+            )
+            result['url'] = url
+            result['error'] = None
+            return result
+            
+        except Exception as e:
+            if logger:
+                logger.error(f"Failed to analyze {url}: {e}")
+            return {
+                'url': url,
+                'mobile_score': None,
+                'desktop_score': None,
+                'psi_url': None,
+                'error': str(e)
+            }
+        finally:
+            await browser.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description='PageSpeed Insights audit tool')
-    parser.add_argument('--tab', required=True, help='Spreadsheet tab name')
+    parser.add_argument('--tab', help='Spreadsheet tab name')
     parser.add_argument('--service-account', default=SERVICE_ACCOUNT_FILE, help=f'Service account JSON file (default: {SERVICE_ACCOUNT_FILE})')
     parser.add_argument('--spreadsheet-id', default=DEFAULT_SPREADSHEET_ID, help=f'Spreadsheet ID (default: {DEFAULT_SPREADSHEET_ID})')
     parser.add_argument('--concurrency', type=int, default=15, help='Parallel workers (default: 15)')
-    parser.add_argument('--timeout', type=int, default=120, help='Timeout per URL in seconds (default: 120)')
+    parser.add_argument('--timeout', type=int, default=180, help='Timeout per URL in seconds (default: 180)')
     parser.add_argument('--initial-wait', type=int, default=30, help='Initial wait before polling for scores in seconds (default: 30)')
     parser.add_argument('--poll-timeout', type=int, default=120, help='Maximum time to poll for scores in seconds (default: 120)')
+    parser.add_argument('--sequential', action='store_true', help='Process URLs one at a time (sets concurrency=1)')
+    parser.add_argument('--url', help='Test a single URL directly without spreadsheet')
     
     args = parser.parse_args()
     
+    # Setup logger
+    logger = setup_logger('audit', log_dir='logs')
+    
+    # Handle single URL mode
+    if args.url:
+        logger.info(f"Single URL mode: {args.url}")
+        logger.info(f"Timeout: {args.timeout}s")
+        
+        try:
+            result = asyncio.run(analyze_single_url(args.url, timeout=args.timeout, logger=logger))
+            
+            if result['error']:
+                logger.error(f"✗ {args.url}: {result['error']}")
+                sys.exit(1)
+            else:
+                mobile_score = result['mobile_score']
+                desktop_score = result['desktop_score']
+                psi_url = result['psi_url']
+                
+                logger.info("=" * 80)
+                logger.info("RESULTS")
+                logger.info("=" * 80)
+                logger.info(f"URL: {args.url}")
+                logger.info(f"Mobile Score: {mobile_score}")
+                logger.info(f"Desktop Score: {desktop_score}")
+                logger.info(f"PageSpeed Insights URL: {psi_url}")
+                logger.info(f"Mobile: {'✓ PASSED' if mobile_score >= SCORE_THRESHOLD else '✗ FAILED'} (threshold: {SCORE_THRESHOLD})")
+                logger.info(f"Desktop: {'✓ PASSED' if desktop_score >= SCORE_THRESHOLD else '✗ FAILED'} (threshold: {SCORE_THRESHOLD})")
+                logger.info("=" * 80)
+                
+                sys.exit(0 if mobile_score >= SCORE_THRESHOLD and desktop_score >= SCORE_THRESHOLD else 1)
+        except Exception as e:
+            logger.error(f"Failed to analyze URL: {e}")
+            sys.exit(1)
+    
+    # Spreadsheet mode requires --tab
+    if not args.tab:
+        logger.error("Error: --tab is required when not using --url")
+        parser.print_help()
+        sys.exit(1)
+    
+    # Apply sequential mode
+    if args.sequential:
+        args.concurrency = 1
+        logger.info("Sequential mode enabled (concurrency=1)")
+    
     if not os.path.exists(args.service_account):
-        print(f"Error: Service account file not found: {args.service_account}")
+        logger.error(f"Error: Service account file not found: {args.service_account}")
         sys.exit(1)
     
     # Authenticate
-    print("Authenticating...")
+    logger.info("Authenticating...")
     try:
         service = sheets_client.authenticate(args.service_account)
     except Exception as e:
-        print(f"Authentication failed: {e}")
+        logger.error(f"Authentication failed: {e}")
         sys.exit(1)
     
     # Read URLs
-    print(f"Reading URLs from tab '{args.tab}'...")
+    logger.info(f"Reading URLs from tab '{args.tab}'...")
     try:
         url_data = sheets_client.read_urls(args.spreadsheet_id, args.tab, service=service)
     except Exception as e:
-        print(f"Failed to read URLs: {e}")
+        logger.error(f"Failed to read URLs: {e}")
         sys.exit(1)
     
     if not url_data:
-        print("No URLs found")
+        logger.info("No URLs found")
         return
     
     # Filter out URLs that should be skipped or already have both scores
@@ -76,10 +195,10 @@ def main():
         }
     
     if not urls_to_process:
-        print("No URLs to process (all skipped or completed)")
+        logger.info("No URLs to process (all skipped or completed)")
         return
     
-    print(f"Processing {len(urls_to_process)} URLs with {args.concurrency} workers...")
+    logger.info(f"Processing {len(urls_to_process)} URLs with {args.concurrency} workers...")
     
     # Run parallel analysis
     try:
@@ -90,7 +209,7 @@ def main():
             poll_timeout=args.poll_timeout
         ))
     except Exception as e:
-        print(f"Analysis failed: {e}")
+        logger.error(f"Analysis failed: {e}")
         sys.exit(1)
     
     # Process results and write to sheet
@@ -118,7 +237,7 @@ def main():
             if not existing_desktop:
                 updates.append((row_index, DESKTOP_COLUMN, error_msg))
             failed += 1
-            print(f"✗ {url}: {result['error']}")
+            logger.info(f"✗ {url}: {result['error']}")
         else:
             mobile_score = result['mobile_score']
             desktop_score = result['desktop_score']
@@ -143,27 +262,27 @@ def main():
                     desktop_fail += 1
             
             successful += 1
-            print(f"✓ {url}: Mobile={mobile_score}, Desktop={desktop_score}")
+            logger.info(f"✓ {url}: Mobile={mobile_score}, Desktop={desktop_score}")
         
         # Write immediately
         for row_idx, col, val in updates:
             try:
                 sheets_client.write_result(args.spreadsheet_id, args.tab, row_idx, col, val, service)
             except Exception as e:
-                print(f"  Warning: Failed to write {col}{row_idx} for {url}: {e}")
+                logger.warning(f"Failed to write {col}{row_idx} for {url}: {e}")
     
     # Print summary
-    print("\n" + "=" * 80)
-    print("SUMMARY")
-    print("=" * 80)
-    print(f"Total URLs: {len(results)}")
-    print(f"Successful: {successful}")
-    print(f"Failed: {failed}")
-    print(f"Mobile pass (>={SCORE_THRESHOLD}): {mobile_pass}")
-    print(f"Mobile fail (<{SCORE_THRESHOLD}): {mobile_fail}")
-    print(f"Desktop pass (>={SCORE_THRESHOLD}): {desktop_pass}")
-    print(f"Desktop fail (<{SCORE_THRESHOLD}): {desktop_fail}")
-    print("=" * 80)
+    logger.info("\n" + "=" * 80)
+    logger.info("SUMMARY")
+    logger.info("=" * 80)
+    logger.info(f"Total URLs: {len(results)}")
+    logger.info(f"Successful: {successful}")
+    logger.info(f"Failed: {failed}")
+    logger.info(f"Mobile pass (>={SCORE_THRESHOLD}): {mobile_pass}")
+    logger.info(f"Mobile fail (<{SCORE_THRESHOLD}): {mobile_fail}")
+    logger.info(f"Desktop pass (>={SCORE_THRESHOLD}): {desktop_pass}")
+    logger.info(f"Desktop fail (<{SCORE_THRESHOLD}): {desktop_fail}")
+    logger.info("=" * 80)
 
 
 if __name__ == '__main__':
