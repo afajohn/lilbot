@@ -97,12 +97,14 @@ def main():
     parser.add_argument('--tab', help='Spreadsheet tab name')
     parser.add_argument('--service-account', default=SERVICE_ACCOUNT_FILE, help=f'Service account JSON file (default: {SERVICE_ACCOUNT_FILE})')
     parser.add_argument('--spreadsheet-id', default=DEFAULT_SPREADSHEET_ID, help=f'Spreadsheet ID (default: {DEFAULT_SPREADSHEET_ID})')
-    parser.add_argument('--concurrency', type=int, default=15, help='Parallel workers (default: 15)')
+    parser.add_argument('--concurrency', type=int, default=5, help='Parallel workers (default: 5)')
     parser.add_argument('--timeout', type=int, default=180, help='Timeout per URL in seconds (default: 180)')
     parser.add_argument('--initial-wait', type=int, default=30, help='Initial wait before polling for scores in seconds (default: 30)')
     parser.add_argument('--poll-timeout', type=int, default=120, help='Maximum time to poll for scores in seconds (default: 120)')
+    parser.add_argument('--urls-per-context', type=int, default=10, help='Number of URLs to process per browser context before recycling (default: 10)')
     parser.add_argument('--sequential', action='store_true', help='Process URLs one at a time (sets concurrency=1)')
     parser.add_argument('--url', help='Test a single URL directly without spreadsheet')
+    parser.add_argument('--no-retry', action='store_true', help='Disable interactive retry on failures')
     
     args = parser.parse_args()
     
@@ -200,88 +202,154 @@ def main():
     
     logger.info(f"Processing {len(urls_to_process)} URLs with {args.concurrency} workers...")
     
-    # Run parallel analysis
-    try:
-        results = asyncio.run(playwright_runner.run_batch(
-            urls_to_process, 
-            concurrency=args.concurrency,
-            initial_wait=args.initial_wait,
-            poll_timeout=args.poll_timeout
-        ))
-    except Exception as e:
-        logger.error(f"Analysis failed: {e}")
-        sys.exit(1)
+    # Retry loop: process URLs until all succeed or user declines retry
+    retry_attempt = 0
+    current_urls = urls_to_process
     
-    # Process results and write to sheet
-    successful = 0
-    failed = 0
-    mobile_pass = 0
-    mobile_fail = 0
-    desktop_pass = 0
-    desktop_fail = 0
-    
-    for result in results:
-        url = result['url']
-        metadata = url_metadata[url]
-        row_index = metadata['row']
-        existing_mobile = metadata['existing_mobile']
-        existing_desktop = metadata['existing_desktop']
+    while current_urls:
+        if retry_attempt > 0:
+            logger.info(f"\n{'=' * 80}")
+            logger.info(f"RETRY ATTEMPT {retry_attempt}")
+            logger.info(f"{'=' * 80}")
+            logger.info(f"Processing {len(current_urls)} failed URLs with {args.concurrency} workers...")
         
-        updates = []
+        # Run parallel analysis
+        try:
+            results = asyncio.run(playwright_runner.run_batch(
+                current_urls, 
+                concurrency=args.concurrency,
+                initial_wait=args.initial_wait,
+                poll_timeout=args.poll_timeout,
+                urls_per_context=args.urls_per_context
+            ))
+        except Exception as e:
+            logger.error(f"Analysis failed: {e}")
+            sys.exit(1)
         
-        if result['error']:
-            # Write error to empty columns
-            error_msg = f"ERROR: {result['error']}"
-            if not existing_mobile:
-                updates.append((row_index, MOBILE_COLUMN, error_msg))
-            if not existing_desktop:
-                updates.append((row_index, DESKTOP_COLUMN, error_msg))
-            failed += 1
-            logger.info(f"✗ {url}: {result['error']}")
-        else:
-            mobile_score = result['mobile_score']
-            desktop_score = result['desktop_score']
-            psi_url = result['psi_url']
-            
-            # Write mobile result
-            if not existing_mobile and mobile_score is not None:
-                if mobile_score >= SCORE_THRESHOLD:
-                    updates.append((row_index, MOBILE_COLUMN, 'passed'))
-                    mobile_pass += 1
-                else:
-                    updates.append((row_index, MOBILE_COLUMN, psi_url or f"Score: {mobile_score}"))
-                    mobile_fail += 1
-            
-            # Write desktop result
-            if not existing_desktop and desktop_score is not None:
-                if desktop_score >= SCORE_THRESHOLD:
-                    updates.append((row_index, DESKTOP_COLUMN, 'passed'))
-                    desktop_pass += 1
-                else:
-                    updates.append((row_index, DESKTOP_COLUMN, psi_url or f"Score: {desktop_score}"))
-                    desktop_fail += 1
-            
-            successful += 1
-            logger.info(f"✓ {url}: Mobile={mobile_score}, Desktop={desktop_score}")
+        # Process results and collect updates for batch writing
+        successful = 0
+        failed = 0
+        mobile_pass = 0
+        mobile_fail = 0
+        desktop_pass = 0
+        desktop_fail = 0
         
-        # Write immediately
-        for row_idx, col, val in updates:
+        all_updates = []
+        failed_urls = []
+        
+        for result in results:
+            url = result['url']
+            metadata = url_metadata[url]
+            row_index = metadata['row']
+            existing_mobile = metadata['existing_mobile']
+            existing_desktop = metadata['existing_desktop']
+            
+            if result['error']:
+                # Collect error updates for empty columns
+                error_msg = f"ERROR: {result['error']}"
+                if not existing_mobile:
+                    all_updates.append((row_index, MOBILE_COLUMN, error_msg))
+                if not existing_desktop:
+                    all_updates.append((row_index, DESKTOP_COLUMN, error_msg))
+                failed += 1
+                failed_urls.append(url)
+                logger.info(f"✗ {url}: {result['error']}")
+            else:
+                mobile_score = result['mobile_score']
+                desktop_score = result['desktop_score']
+                psi_url = result['psi_url']
+                
+                # Collect mobile result
+                if not existing_mobile and mobile_score is not None:
+                    if mobile_score >= SCORE_THRESHOLD:
+                        all_updates.append((row_index, MOBILE_COLUMN, 'passed'))
+                        mobile_pass += 1
+                    else:
+                        all_updates.append((row_index, MOBILE_COLUMN, psi_url or f"Score: {mobile_score}"))
+                        mobile_fail += 1
+                
+                # Collect desktop result
+                if not existing_desktop and desktop_score is not None:
+                    if desktop_score >= SCORE_THRESHOLD:
+                        all_updates.append((row_index, DESKTOP_COLUMN, 'passed'))
+                        desktop_pass += 1
+                    else:
+                        all_updates.append((row_index, DESKTOP_COLUMN, psi_url or f"Score: {desktop_score}"))
+                        desktop_fail += 1
+                
+                successful += 1
+                logger.info(f"✓ {url}: Mobile={mobile_score}, Desktop={desktop_score}")
+        
+        # Write updates in batches of 50-60 cells
+        batch_size = 50
+        total_updates = len(all_updates)
+        logger.info(f"Writing {total_updates} updates in batches of {batch_size}...")
+        
+        for i in range(0, total_updates, batch_size):
+            batch = all_updates[i:i + batch_size]
+            batch_num = (i // batch_size) + 1
+            total_batches = (total_updates + batch_size - 1) // batch_size
+            
             try:
-                sheets_client.write_result(args.spreadsheet_id, args.tab, row_idx, col, val, service)
+                logger.info(f"Writing batch {batch_num}/{total_batches} ({len(batch)} cells)...")
+                sheets_client.batch_write_results(args.spreadsheet_id, args.tab, batch, service)
             except Exception as e:
-                logger.warning(f"Failed to write {col}{row_idx} for {url}: {e}")
+                logger.warning(f"Failed to write batch {batch_num}: {e}")
+                # Fallback to individual writes for this batch
+                logger.info(f"Falling back to individual writes for batch {batch_num}...")
+                for row_idx, col, val in batch:
+                    try:
+                        sheets_client.write_result(args.spreadsheet_id, args.tab, row_idx, col, val, service)
+                    except Exception as e2:
+                        logger.warning(f"Failed to write {col}{row_idx}: {e2}")
+        
+        # Print summary
+        logger.info("\n" + "=" * 80)
+        logger.info("BATCH SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"Total URLs: {len(results)}")
+        logger.info(f"Successful: {successful}")
+        logger.info(f"Failed: {failed}")
+        logger.info(f"Mobile pass (>={SCORE_THRESHOLD}): {mobile_pass}")
+        logger.info(f"Mobile fail (<{SCORE_THRESHOLD}): {mobile_fail}")
+        logger.info(f"Desktop pass (>={SCORE_THRESHOLD}): {desktop_pass}")
+        logger.info(f"Desktop fail (<{SCORE_THRESHOLD}): {desktop_fail}")
+        logger.info("=" * 80)
+        
+        # Check if there are failed URLs and user wants to retry
+        if failed_urls and not args.no_retry:
+            logger.info(f"\n{len(failed_urls)} URL(s) failed with errors.")
+            logger.info("Failed URLs:")
+            for url in failed_urls:
+                logger.info(f"  - {url}")
+            
+            # Prompt user for retry
+            try:
+                response = input(f"\nRetry {len(failed_urls)} failed URL(s)? (y/n): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                logger.info("\nNo retry selected (interrupted).")
+                response = 'n'
+            
+            if response == 'y' or response == 'yes':
+                retry_attempt += 1
+                current_urls = failed_urls
+                logger.info(f"Retrying {len(failed_urls)} failed URL(s)...")
+            else:
+                logger.info("Retry declined. Exiting.")
+                break
+        else:
+            # No failed URLs or retry disabled - exit loop
+            if failed_urls and args.no_retry:
+                logger.info(f"\n{len(failed_urls)} URL(s) failed. Retry disabled (--no-retry).")
+            break
     
-    # Print summary
+    # Print final summary
     logger.info("\n" + "=" * 80)
-    logger.info("SUMMARY")
+    logger.info("FINAL SUMMARY")
     logger.info("=" * 80)
-    logger.info(f"Total URLs: {len(results)}")
-    logger.info(f"Successful: {successful}")
-    logger.info(f"Failed: {failed}")
-    logger.info(f"Mobile pass (>={SCORE_THRESHOLD}): {mobile_pass}")
-    logger.info(f"Mobile fail (<{SCORE_THRESHOLD}): {mobile_fail}")
-    logger.info(f"Desktop pass (>={SCORE_THRESHOLD}): {desktop_pass}")
-    logger.info(f"Desktop fail (<{SCORE_THRESHOLD}): {desktop_fail}")
+    if retry_attempt > 0:
+        logger.info(f"Total retry attempts: {retry_attempt}")
+    logger.info(f"Completed successfully.")
     logger.info("=" * 80)
 
 
