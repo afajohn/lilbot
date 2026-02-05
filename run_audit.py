@@ -212,13 +212,15 @@ def main():
         logger.error(f"Analysis failed: {e}")
         sys.exit(1)
     
-    # Process results and write to sheet
+    # Process results and collect updates for batch writing
     successful = 0
     failed = 0
     mobile_pass = 0
     mobile_fail = 0
     desktop_pass = 0
     desktop_fail = 0
+    
+    all_updates = []
     
     for result in results:
         url = result['url']
@@ -227,15 +229,13 @@ def main():
         existing_mobile = metadata['existing_mobile']
         existing_desktop = metadata['existing_desktop']
         
-        updates = []
-        
         if result['error']:
-            # Write error to empty columns
+            # Collect error updates for empty columns
             error_msg = f"ERROR: {result['error']}"
             if not existing_mobile:
-                updates.append((row_index, MOBILE_COLUMN, error_msg))
+                all_updates.append((row_index, MOBILE_COLUMN, error_msg))
             if not existing_desktop:
-                updates.append((row_index, DESKTOP_COLUMN, error_msg))
+                all_updates.append((row_index, DESKTOP_COLUMN, error_msg))
             failed += 1
             logger.info(f"✗ {url}: {result['error']}")
         else:
@@ -243,33 +243,49 @@ def main():
             desktop_score = result['desktop_score']
             psi_url = result['psi_url']
             
-            # Write mobile result
+            # Collect mobile result
             if not existing_mobile and mobile_score is not None:
                 if mobile_score >= SCORE_THRESHOLD:
-                    updates.append((row_index, MOBILE_COLUMN, 'passed'))
+                    all_updates.append((row_index, MOBILE_COLUMN, 'passed'))
                     mobile_pass += 1
                 else:
-                    updates.append((row_index, MOBILE_COLUMN, psi_url or f"Score: {mobile_score}"))
+                    all_updates.append((row_index, MOBILE_COLUMN, psi_url or f"Score: {mobile_score}"))
                     mobile_fail += 1
             
-            # Write desktop result
+            # Collect desktop result
             if not existing_desktop and desktop_score is not None:
                 if desktop_score >= SCORE_THRESHOLD:
-                    updates.append((row_index, DESKTOP_COLUMN, 'passed'))
+                    all_updates.append((row_index, DESKTOP_COLUMN, 'passed'))
                     desktop_pass += 1
                 else:
-                    updates.append((row_index, DESKTOP_COLUMN, psi_url or f"Score: {desktop_score}"))
+                    all_updates.append((row_index, DESKTOP_COLUMN, psi_url or f"Score: {desktop_score}"))
                     desktop_fail += 1
             
             successful += 1
             logger.info(f"✓ {url}: Mobile={mobile_score}, Desktop={desktop_score}")
+    
+    # Write updates in batches of 50-60 cells
+    batch_size = 50
+    total_updates = len(all_updates)
+    logger.info(f"Writing {total_updates} updates in batches of {batch_size}...")
+    
+    for i in range(0, total_updates, batch_size):
+        batch = all_updates[i:i + batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = (total_updates + batch_size - 1) // batch_size
         
-        # Write immediately
-        for row_idx, col, val in updates:
-            try:
-                sheets_client.write_result(args.spreadsheet_id, args.tab, row_idx, col, val, service)
-            except Exception as e:
-                logger.warning(f"Failed to write {col}{row_idx} for {url}: {e}")
+        try:
+            logger.info(f"Writing batch {batch_num}/{total_batches} ({len(batch)} cells)...")
+            sheets_client.batch_write_results(args.spreadsheet_id, args.tab, batch, service)
+        except Exception as e:
+            logger.warning(f"Failed to write batch {batch_num}: {e}")
+            # Fallback to individual writes for this batch
+            logger.info(f"Falling back to individual writes for batch {batch_num}...")
+            for row_idx, col, val in batch:
+                try:
+                    sheets_client.write_result(args.spreadsheet_id, args.tab, row_idx, col, val, service)
+                except Exception as e2:
+                    logger.warning(f"Failed to write {col}{row_idx}: {e2}")
     
     # Print summary
     logger.info("\n" + "=" * 80)

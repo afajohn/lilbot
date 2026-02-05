@@ -194,3 +194,66 @@ def write_result(
                     time.sleep(2 ** attempt)
                     continue
             raise
+
+
+def batch_write_results(
+    spreadsheet_id: str,
+    tab_name: str,
+    updates: List[Tuple[int, str, str]],
+    service
+) -> None:
+    """
+    Write multiple cell values to the spreadsheet in a single batch request.
+    
+    Args:
+        spreadsheet_id: The ID of the Google Spreadsheet
+        tab_name: The name of the tab/sheet to write to
+        updates: List of tuples (row_index, column, value) where:
+                 - row_index is 1-based
+                 - column is a column letter (e.g., 'F' or 'G')
+                 - value is the value to write
+        service: Authenticated service object from authenticate()
+        
+    Raises:
+        PermanentError: If there's a permission or resource error
+    """
+    if not updates:
+        return
+    
+    sheet = service.spreadsheets()
+    
+    # Build the data array for batchUpdate
+    data = []
+    for row_index, column, value in updates:
+        range_name = f"{tab_name}!{column}{row_index}"
+        data.append({
+            'range': range_name,
+            'values': [[value]]
+        })
+    
+    body = {
+        'valueInputOption': 'RAW',
+        'data': data
+    }
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            sheet.values().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body=body
+            ).execute()
+            return
+        except HttpError as e:
+            if e.resp.status == 403:
+                raise PermanentError(
+                    "Permission denied. Check service account permissions.",
+                    original_exception=e
+                )
+            elif e.resp.status == 404:
+                raise PermanentError("Resource not found.", original_exception=e)
+            elif e.resp.status == 429 or e.resp.status >= 500:
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+            raise
