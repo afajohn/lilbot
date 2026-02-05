@@ -28,6 +28,8 @@ def main():
     parser.add_argument('--spreadsheet-id', default=DEFAULT_SPREADSHEET_ID, help=f'Spreadsheet ID (default: {DEFAULT_SPREADSHEET_ID})')
     parser.add_argument('--concurrency', type=int, default=15, help='Parallel workers (default: 15)')
     parser.add_argument('--timeout', type=int, default=120, help='Timeout per URL in seconds (default: 120)')
+    parser.add_argument('--initial-wait', type=int, default=30, help='Initial wait before polling for scores in seconds (default: 30)')
+    parser.add_argument('--poll-timeout', type=int, default=120, help='Maximum time to poll for scores in seconds (default: 120)')
     
     args = parser.parse_args()
     
@@ -81,7 +83,12 @@ def main():
     
     # Run parallel analysis
     try:
-        results = asyncio.run(playwright_runner.run_batch(urls_to_process, concurrency=args.concurrency))
+        results = asyncio.run(playwright_runner.run_batch(
+            urls_to_process, 
+            concurrency=args.concurrency,
+            initial_wait=args.initial_wait,
+            poll_timeout=args.poll_timeout
+        ))
     except Exception as e:
         print(f"Analysis failed: {e}")
         sys.exit(1)

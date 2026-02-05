@@ -17,13 +17,15 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-async def analyze_url(page: Page, url: str) -> dict:
+async def analyze_url(page: Page, url: str, initial_wait: int = 30, poll_timeout: int = 120) -> dict:
     """
     Analyze a URL using PageSpeed Insights.
     
     Args:
         page: Playwright page object
         url: URL to analyze
+        initial_wait: Initial wait time in seconds before polling for scores (default: 30)
+        poll_timeout: Maximum time to poll for scores in seconds (default: 120)
         
     Returns:
         Dictionary with mobile_score, desktop_score, psi_url
@@ -84,46 +86,96 @@ async def analyze_url(page: Page, url: str) -> dict:
     if not clicked:
         raise Exception("Failed to click Analyze button")
     
-    # Wait 30s for initialization
-    await asyncio.sleep(30)
+    # Wait for initial analysis initialization
+    logger.info(f"Waiting {initial_wait}s for initial analysis to complete...")
+    await asyncio.sleep(initial_wait)
     
-    # Poll for score elements (up to 120s)
+    # Poll for score elements with progress logging and error checking
     start_time = asyncio.get_event_loop().time()
-    timeout = 120
     poll_interval = 2
+    last_log_time = start_time
     
-    while asyncio.get_event_loop().time() - start_time < timeout:
-        try:
-            score_elements = await page.locator('.lh-gauge__percentage').all()
-            if len(score_elements) >= 1:
-                # Check if mobile/desktop buttons are visible
-                try:
-                    mobile_button = page.locator('button:has-text("Mobile"), [role="tab"]:has-text("Mobile")').first
-                    desktop_button = page.locator('button:has-text("Desktop"), [role="tab"]:has-text("Desktop")').first
-                    
-                    mobile_visible = await mobile_button.is_visible(timeout=1000)
-                    desktop_visible = await desktop_button.is_visible(timeout=1000)
-                    
-                    if mobile_visible or desktop_visible:
-                        break
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    # Score selectors to try (primary and alternatives)
+    score_selectors = [
+        '.lh-gauge__percentage',
+        '[class*="gauge"][class*="percentage"]',
+        '[data-testid*="score"]'
+    ]
+    
+    # PSI error state selectors
+    error_selectors = [
+        '.lh-error',
+        '[class*="error"]',
+        '[data-testid*="error"]'
+    ]
+    
+    while asyncio.get_event_loop().time() - start_time < poll_timeout:
+        current_time = asyncio.get_event_loop().time()
+        elapsed = current_time - start_time
+        
+        # Log progress every 30 seconds
+        if current_time - last_log_time >= 30:
+            logger.info(f"Polling progress: {elapsed:.0f}s elapsed, waiting for scores...")
+            last_log_time = current_time
+        
+        # Check for PSI error states
+        for error_selector in error_selectors:
+            try:
+                error_element = await page.locator(error_selector).first.is_visible(timeout=500)
+                if error_element:
+                    error_text = await page.locator(error_selector).first.inner_text(timeout=1000)
+                    raise Exception(f"PageSpeed Insights error detected: {error_text}")
+            except PlaywrightTimeoutError:
+                # No error element found, continue
+                pass
+            except Exception as e:
+                # If it's not a timeout, it might be an actual error
+                if "PageSpeed Insights error detected" in str(e):
+                    raise
+        
+        # Try to find score elements using alternative selectors
+        score_elements = None
+        for selector in score_selectors:
+            try:
+                elements = await page.locator(selector).all()
+                if len(elements) >= 1:
+                    score_elements = elements
+                    logger.debug(f"Found score elements using selector: {selector}")
+                    break
+            except Exception:
+                continue
+        
+        if score_elements:
+            # Check if mobile/desktop buttons are visible
+            try:
+                mobile_button = page.locator('button:has-text("Mobile"), [role="tab"]:has-text("Mobile")').first
+                desktop_button = page.locator('button:has-text("Desktop"), [role="tab"]:has-text("Desktop")').first
+                
+                mobile_visible = await mobile_button.is_visible(timeout=1000)
+                desktop_visible = await desktop_button.is_visible(timeout=1000)
+                
+                if mobile_visible or desktop_visible:
+                    logger.info(f"Score elements found after {elapsed:.0f}s")
+                    break
+            except Exception:
+                pass
         
         await asyncio.sleep(poll_interval)
     else:
-        raise Exception(f"Score elements not found within {timeout}s")
+        raise Exception(f"Score elements not found within {poll_timeout}s")
     
-    # Extract mobile score
+    # Extract mobile score using alternative selectors
     mobile_score = None
-    score_elements = await page.locator('.lh-gauge__percentage').all()
-    if score_elements:
+    for selector in score_selectors:
         try:
-            score_text = await score_elements[0].inner_text()
-            mobile_score = int(score_text.strip().replace('%', ''))
+            score_elements = await page.locator(selector).all()
+            if score_elements:
+                score_text = await score_elements[0].inner_text()
+                mobile_score = int(score_text.strip().replace('%', ''))
+                logger.debug(f"Extracted mobile score using selector: {selector}")
+                break
         except Exception:
-            pass
+            continue
     
     if mobile_score is None:
         raise Exception("Failed to extract mobile score")
@@ -151,15 +203,18 @@ async def analyze_url(page: Page, url: str) -> dict:
     
     await asyncio.sleep(1)
     
-    # Extract desktop score
+    # Extract desktop score using alternative selectors
     desktop_score = None
-    score_elements = await page.locator('.lh-gauge__percentage').all()
-    if score_elements:
+    for selector in score_selectors:
         try:
-            score_text = await score_elements[0].inner_text()
-            desktop_score = int(score_text.strip().replace('%', ''))
+            score_elements = await page.locator(selector).all()
+            if score_elements:
+                score_text = await score_elements[0].inner_text()
+                desktop_score = int(score_text.strip().replace('%', ''))
+                logger.debug(f"Extracted desktop score using selector: {selector}")
+                break
         except Exception:
-            pass
+            continue
     
     if desktop_score is None:
         raise Exception("Failed to extract desktop score")
@@ -171,7 +226,7 @@ async def analyze_url(page: Page, url: str) -> dict:
     }
 
 
-async def analyze_url_with_retry(page: Page, context: BrowserContext, url: str, max_retries: int = 3) -> dict:
+async def analyze_url_with_retry(page: Page, context: BrowserContext, url: str, max_retries: int = 3, initial_wait: int = 30, poll_timeout: int = 120) -> dict:
     """
     Analyze a URL with retry logic for selector timeouts and score extraction failures.
     
@@ -183,6 +238,8 @@ async def analyze_url_with_retry(page: Page, context: BrowserContext, url: str, 
         context: Playwright browser context (not used, but kept for API compatibility)
         url: URL to analyze
         max_retries: Maximum number of retry attempts (default: 3)
+        initial_wait: Initial wait time before polling for scores (default: 30)
+        poll_timeout: Maximum time to poll for scores (default: 120)
         
     Returns:
         Dictionary with mobile_score, desktop_score, psi_url
@@ -195,7 +252,7 @@ async def analyze_url_with_retry(page: Page, context: BrowserContext, url: str, 
     for attempt in range(max_retries):
         try:
             logger.info(f"Attempt {attempt + 1}/{max_retries} for URL: {url}")
-            result = await analyze_url(page, url)
+            result = await analyze_url(page, url, initial_wait=initial_wait, poll_timeout=poll_timeout)
             logger.info(f"Successfully analyzed URL on attempt {attempt + 1}: {url}")
             return result
             
@@ -239,13 +296,15 @@ async def analyze_url_with_retry(page: Page, context: BrowserContext, url: str, 
     raise Exception(f"Failed to analyze {url} after {max_retries} attempts")
 
 
-async def run_batch(urls: List[str], concurrency: int = 15) -> List[dict]:
+async def run_batch(urls: List[str], concurrency: int = 15, initial_wait: int = 30, poll_timeout: int = 120) -> List[dict]:
     """
     Process multiple URLs in parallel with shared browser and multiple contexts.
     
     Args:
         urls: List of URLs to analyze
         concurrency: Maximum number of concurrent analyses (default: 15)
+        initial_wait: Initial wait time before polling for scores (default: 30)
+        poll_timeout: Maximum time to poll for scores (default: 120)
         
     Returns:
         List of result dictionaries (one per URL)
@@ -271,7 +330,7 @@ async def run_batch(urls: List[str], concurrency: int = 15) -> List[dict]:
                 )
                 
                 page = await context.new_page()
-                result = await analyze_url(page, url)
+                result = await analyze_url(page, url, initial_wait=initial_wait, poll_timeout=poll_timeout)
                 result['url'] = url
                 result['error'] = None
                 return result
