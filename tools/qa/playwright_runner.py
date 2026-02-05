@@ -4,14 +4,17 @@ Provides parallel URL processing with shared browser and multiple contexts.
 """
 
 import asyncio
+import logging
 from typing import List, Dict, Optional
 
 try:
-    from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeoutError
+    from playwright.async_api import async_playwright, Page, BrowserContext, TimeoutError as PlaywrightTimeoutError
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
     PlaywrightTimeoutError = Exception
+
+logger = logging.getLogger(__name__)
 
 
 async def analyze_url(page: Page, url: str) -> dict:
@@ -166,6 +169,74 @@ async def analyze_url(page: Page, url: str) -> dict:
         'desktop_score': desktop_score,
         'psi_url': psi_url
     }
+
+
+async def analyze_url_with_retry(page: Page, context: BrowserContext, url: str, max_retries: int = 3) -> dict:
+    """
+    Analyze a URL with retry logic for selector timeouts and score extraction failures.
+    
+    Retries on PlaywrightTimeoutError and selector-related exceptions with exponential backoff.
+    Reloads the page fresh via page.goto() before each retry.
+    
+    Args:
+        page: Playwright page object
+        context: Playwright browser context (not used, but kept for API compatibility)
+        url: URL to analyze
+        max_retries: Maximum number of retry attempts (default: 3)
+        
+    Returns:
+        Dictionary with mobile_score, desktop_score, psi_url
+        
+    Raises:
+        Exception: If all retry attempts fail or on permanent errors
+    """
+    backoff_delays = [5, 10, 20]
+    
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Attempt {attempt + 1}/{max_retries} for URL: {url}")
+            result = await analyze_url(page, url)
+            logger.info(f"Successfully analyzed URL on attempt {attempt + 1}: {url}")
+            return result
+            
+        except PlaywrightTimeoutError as e:
+            error_msg = str(e).lower()
+            
+            if attempt < max_retries - 1:
+                delay = backoff_delays[attempt] if attempt < len(backoff_delays) else 20
+                logger.warning(f"Selector timeout on attempt {attempt + 1} for {url}: {e}. Retrying in {delay}s...")
+                await asyncio.sleep(delay)
+                
+                try:
+                    await page.goto('about:blank', wait_until='load', timeout=10000)
+                except Exception:
+                    pass
+            else:
+                logger.error(f"Failed after {max_retries} attempts for {url}: {e}")
+                raise
+                
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            is_selector_error = any(keyword in error_msg for keyword in [
+                'selector', 'failed to find', 'not found', 'not visible',
+                'failed to click', 'failed to extract', 'element'
+            ])
+            
+            if is_selector_error and attempt < max_retries - 1:
+                delay = backoff_delays[attempt] if attempt < len(backoff_delays) else 20
+                logger.warning(f"Selector-related error on attempt {attempt + 1} for {url}: {e}. Retrying in {delay}s...")
+                await asyncio.sleep(delay)
+                
+                try:
+                    await page.goto('about:blank', wait_until='load', timeout=10000)
+                except Exception:
+                    pass
+            else:
+                logger.error(f"Non-retryable error or max retries reached for {url}: {e}")
+                raise
+    
+    raise Exception(f"Failed to analyze {url} after {max_retries} attempts")
 
 
 async def run_batch(urls: List[str], concurrency: int = 15) -> List[dict]:
